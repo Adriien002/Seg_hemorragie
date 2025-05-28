@@ -1,21 +1,19 @@
 import os
 import warnings
+import numpy as np
+import torch
 
 import pytorch_lightning as pl
-import torch
-from monai.data import DataLoader, PersistentDataset, Dataset
+from monai.data import DataLoader, PersistentDataset
 from monai.inferers import sliding_window_inference
 from monai.losses import DiceCELoss
-from monai.metrics import DiceMetric, DiceHelper
-from monai.networks.nets import UNet,SwinUNETR
+from monai.metrics import DiceHelper
+from monai.networks.nets import SwinUNETR
 import monai.transforms as T
-from pytorch_lightning.loggers import TensorBoardLogger
-from torch.optim import SGD
-from transformers import get_linear_schedule_with_warmup
 from pytorch_lightning import Trainer
 
-
-
+warnings.filterwarnings("ignore", message="You are using `torch.load` with `weights_only=False`")
+os.environ["PYTHONWARNINGS"] = "ignore"
 
 # Configuration
 DATASET_DIR = '/home/tibia/Projet_Hemorragie/mbh_seg/nii'
@@ -24,108 +22,147 @@ SAVE_DIR = "/home/tibia/Projet_Hemorragie/inference"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
 test_transforms = T.Compose([
-    # Loading transforms
     T.LoadImaged(keys=["image", "seg"]),
     T.EnsureChannelFirstd(keys=["image", "seg"]),
-    T.CropForegroundd(keys=['image', 'seg'], source_key='image'), # who cares about the background ?
-    T.Orientationd(keys=["image", "seg"], axcodes='RAS'),  # make sure all images are the same orientation
-    T.Spacingd(keys=["image", "seg"], pixdim=(1., 1., 1.), mode=['bilinear', 'nearest']), # to isotropic spacing
-    T.SpatialPadd(keys=["image", "seg"], spatial_size=(96, 96, 32)),  # make sure we have at least 96 slices
-    T.ScaleIntensityRanged(keys=["image"], a_min=-10, a_max=140, b_min=0.0, b_max=1.0, clip=True),  # clip images
+    T.CropForegroundd(keys=['image', 'seg'], source_key='image'),
+    T.Orientationd(keys=["image", "seg"], axcodes='RAS'),
+    T.Spacingd(keys=["image", "seg"], pixdim=(1., 1., 1.), mode=['bilinear', 'nearest']),
+    T.SpatialPadd(keys=["image", "seg"], spatial_size=(96, 96, 96)),
+    T.ScaleIntensityRanged(keys=["image"], a_min=-10, a_max=140, b_min=0.0, b_max=1.0, clip=True),
 ])
-
 
 def get_data_files(img_dir, seg_dir):
     images = sorted([os.path.join(img_dir, f) for f in os.listdir(img_dir) if f.endswith('.nii.gz')])
     labels = sorted([os.path.join(seg_dir, f) for f in os.listdir(seg_dir) if f.endswith('.nii.gz')])
     return [{"image": img, "seg": lbl} for img, lbl in zip(images, labels)]
 
-
-
-
-##DEF DU MODELE
 class HemorrhageModel(pl.LightningModule):
-    def __init__(self, num_steps):
+    def __init__(self, num_steps=1):  # Valeur par défaut pour l'inférence
         super().__init__()
         self.num_steps = num_steps
         self.model = SwinUNETR(
-        img_size=(96, 96, 96),  
-        in_channels=1,
-        out_channels=6,
-        feature_size=48,  
-        use_checkpoint=True  # Pour économiser la mémoire
-)
-        self.loss_fn = DiceCELoss(include_background=False, to_onehot_y=True, softmax=True) # don't need to weight the dice ce loss
-        self.dice_metric = DiceHelper(include_background=False,
-                                      softmax=True,
-                                      num_classes=6,
-                                      reduction='none')
+            img_size=(96, 96, 96),  
+            in_channels=1,
+            out_channels=6,
+            feature_size=48,  
+            use_checkpoint=True
+        )
+        self.loss_fn = DiceCELoss(include_background=False, to_onehot_y=True, softmax=True)
+        self.dice_metric = DiceHelper(
+            include_background=False,
+            softmax=True,
+            num_classes=6,
+            reduction='none'
+        )
 
- 
-   
     def predict_step(self, batch, batch_idx):
         x, y = batch["image"], batch["seg"]
         
         # Inférence avec sliding window
-        y_hat = sliding_window_inference(x,
-                                        roi_size=(96, 96, 96),
-                                        sw_batch_size=2,
-                                        predictor=self.model)
+        y_hat = sliding_window_inference(
+            x,
+            roi_size=(96, 96, 96),
+            sw_batch_size=2,
+            predictor=self.model
+        )
         
-      
-      
+        # Calcul des scores Dice
         scores, _ = self.dice_metric(y_hat, y)
         
+        # Extraction des scores par classe
         dice_scores = {}
-        for class_idx in range(5):  # 0-4 correspondant aux classes 1-5
+        for class_idx in range(5):  # Classes 1-5
             dice_scores[f"dice_c{class_idx+1}"] = scores[0, class_idx].item()
-    
-    # Si besoin de la classe 0 (background)
-    # dice_scores["dice_c0"] = ... 
-    
+        
+        if isinstance(batch["image"].meta["filename_or_obj"], list):
+            full_path = batch["image"].meta["filename_or_obj"][0]
+        else:
+            full_path = batch["image"].meta["filename_or_obj"]
+        
+        filename = os.path.basename(full_path)
+        
         return {
-        'preds': y_hat,
-        'dice': dice_scores,
-        'filenames': batch["image_meta_dict"]["filename_or_obj"]
-    }
-   
-   
-
+            'preds': y_hat.cpu(),  
+            'dice': dice_scores,
+            'filename': filename,
+            'ground_truth': y.cpu()
+        }
 
 def main():
-
-    trainer = Trainer(accelerator="gpu", devices=1)
-    model = HemorrhageModel.load_from_checkpoint("/home/tibia/Projet_Hemorragie/MBH_swin_log/lightning_logs/version_3/checkpoints/epoch=894-step=69810.ckpt", model=HemorrhageModel)
-
-    predictions = trainer.predict(model, dataloaders=[(input_data, None)])
-
+    # Configuration du trainer
+    trainer = Trainer(
+        accelerator="gpu", 
+        devices=[0],
+        logger=False,  # Désactiver les logs pour l'inférence
+        enable_progress_bar=True
+    )
+    
+    # Chargement du modèle depuis le checkpoint
+    print(f"Chargement du modèle depuis : {CHECKPOINT_PATH}")
+    model = HemorrhageModel.load_from_checkpoint(
+        CHECKPOINT_PATH,
+        num_steps=1  # Pas important pour l'inférence
+    )
+    
+    # Préparation des données de test
     test_files = get_data_files(f"{DATASET_DIR}/test/img", f"{DATASET_DIR}/test/seg")
-
+    print(f"Nombre de fichiers de test : {len(test_files)}")
+    
     test_dataset = PersistentDataset(
         test_files,
         transform=test_transforms,
-        cache_dir=os.path.join(SAVE_DIR, "cache_train")
+        cache_dir=os.path.join(SAVE_DIR, "cache_test")  # Changé de cache_train à cache_test
     )
-
-    test_loader = DataLoader(test_dataset, batch_size=1, shuffle=True, num_workers=8)
-
-    predictions = trainer.predict(model, dataloaders=(test_loader))
-
-
-    total_dice = 0.0
-    for i, batch_result in enumerate(predictions):
-        print(f"Case {i+1} ({batch_result['filenames']}):")
-        print(f"Dice score: {batch_result['dice'].item():.4f}")
-        total_dice += batch_result['dice'].item()
     
-    print(f"\nDice score moyen: {total_dice/len(predictions):.4f}")
+    test_loader = DataLoader(
+        test_dataset, 
+        batch_size=1, 
+        shuffle=False,  # Pas de shuffle pour l'inférence
+        num_workers=4  # Réduit pour éviter les problèmes de mémoire
+    )
+    
+    # Lancement de l'inférence
+    print("Début de l'inférence...")
+    predictions = trainer.predict(model, dataloaders=test_loader)
+    
+    # Traitement des résultats
+    all_dice_scores = {f"dice_c{i+1}": [] for i in range(5)}
+    
+    print("\n" + "="*50)
+    print("RÉSULTATS D'INFÉRENCE")
+    print("="*50)
+    
+    for i, batch_result in enumerate(predictions):
+        if batch_result is None:
+            print(f"Résultat vide pour le batch {i}")
+            continue
+        
+        print(f"\nFichier: {batch_result['filename']}")
+        print("-" * 30)
+        
+        for class_name, score in batch_result['dice'].items():
+            print(f"{class_name}: {score:.4f}")
+            all_dice_scores[class_name].append(score)
+    
+    # Calcul des moyennes
+    print("\n" + "="*50)
+    print("MOYENNES PAR CLASSE")
+    print("="*50)
+    
+    overall_mean = []
+    for class_name, scores in all_dice_scores.items():
+        if scores:  # Si il y a des scores pour cette classe
+            mean_score = np.mean(scores)
+            std_score = np.std(scores)
+            print(f"{class_name}: {mean_score:.4f} ± {std_score:.4f} (n={len(scores)})")
+            overall_mean.append(mean_score)
+        else:
+            print(f"{class_name}: Aucune prédiction")
+    
+    if overall_mean:
+        print(f"\nMoyenne générale: {np.mean(overall_mean):.4f}")
+    
+    print(f"\nRésultats sauvegardés dans : {SAVE_DIR}")
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
