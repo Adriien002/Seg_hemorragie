@@ -17,7 +17,7 @@ os.environ["PYTHONWARNINGS"] = "ignore"
 
 # Configuration
 DATASET_DIR = '/home/tibia/Projet_Hemorragie/mbh_seg/nii'
-CHECKPOINT_PATH = "/home/tibia/Projet_Hemorragie/MBH_swin_log/lightning_logs/version_3/checkpoints/epoch=894-step=69810.ckpt"
+CHECKPOINT_PATH = "/home/tibia/Projet_Hemorragie/MBH_swin_log_2/lightning_logs/version_0/checkpoints/epoch=999-step=78000.ckpt"
 SAVE_DIR = "/home/tibia/Projet_Hemorragie/inference"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
@@ -111,7 +111,7 @@ def main():
     test_dataset = PersistentDataset(
         test_files,
         transform=test_transforms,
-        cache_dir=os.path.join(SAVE_DIR, "cache_test")  # Changé de cache_train à cache_test
+        cache_dir=os.path.join(SAVE_DIR, "cache_test")  
     )
     
     test_loader = DataLoader(
@@ -122,47 +122,49 @@ def main():
     )
     
     # Lancement de l'inférence
-    print("Début de l'inférence...")
+    print("Inference begining")
     predictions = trainer.predict(model, dataloaders=test_loader)
     
     # Traitement des résultats
     all_dice_scores = {f"dice_c{i+1}": [] for i in range(5)}
     
     print("\n" + "="*50)
-    print("RÉSULTATS D'INFÉRENCE")
+    print("Inference results")
     print("="*50)
     
     for i, batch_result in enumerate(predictions):
         if batch_result is None:
-            print(f"Résultat vide pour le batch {i}")
+            print(f"Empty results for batch {i}")
             continue
         
-        print(f"\nFichier: {batch_result['filename']}")
+        print(f"\nFile: {batch_result['filename']}")
         print("-" * 30)
         
         for class_name, score in batch_result['dice'].items():
             print(f"{class_name}: {score:.4f}")
-            all_dice_scores[class_name].append(score)
+            if not np.isnan(score):
+                all_dice_scores[class_name].append(score)
     
     # Calcul des moyennes
     print("\n" + "="*50)
-    print("MOYENNES PAR CLASSE")
+    print("Mean per classe")
     print("="*50)
     
     overall_mean = []
     for class_name, scores in all_dice_scores.items():
-        if scores:  # Si il y a des scores pour cette classe
+        valid_scores = [score for score in scores if not np.isnan(score)]
+        if valid_scores:  # If score not nan
             mean_score = np.mean(scores)
             std_score = np.std(scores)
             print(f"{class_name}: {mean_score:.4f} ± {std_score:.4f} (n={len(scores)})")
             overall_mean.append(mean_score)
         else:
-            print(f"{class_name}: Aucune prédiction")
+            print(f"{class_name}: No prediction")
     
     if overall_mean:
-        print(f"\nMoyenne générale: {np.mean(overall_mean):.4f}")
+        print(f"\n Mean {np.mean(overall_mean):.4f}")
     
-    print(f"\nRésultats sauvegardés dans : {SAVE_DIR}")
+    print(f"\nSaving results in  : {SAVE_DIR}")
 
 if __name__ == "__main__":
     main()
