@@ -17,7 +17,7 @@ os.environ["PYTHONWARNINGS"] = "ignore"
 
 # Configuration
 DATASET_DIR = '/home/tibia/Projet_Hemorragie/Seg_hemorragie/split_MONAI/'
-CHECKPOINT_PATH = "/home/tibia/Projet_Hemorragie/v1_log_test/lightning_logs/version_0/checkpoints/epoch=999-step=156000.ckpt"
+CHECKPOINT_PATH = "/home/tibia/Projet_Hemorragie/v2_log_test/lightning_logs/version_0/checkpoints/epoch=999-step=156000.ckpt"
 SAVE_DIR = "/home/tibia/Projet_Hemorragie/inference"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
@@ -40,19 +40,19 @@ class HemorrhageModel(pl.LightningModule):
     def __init__(self, num_steps=1):  # Valeur par défaut pour l'inférence
         super().__init__()
         self.num_steps = num_steps
-        self.model = UNet(
-            spatial_dims=3,
-            in_channels=1,
-            out_channels=4,
-            channels=(32, 64, 128, 256, 320, 320),
-            strides=(2, 2, 2, 2, 2),
-            num_res_units=2,
+        self.model = SwinUNETR(
+        img_size=(96, 96, 96),  
+        in_channels=1,
+        out_channels=4,
+        feature_size=48,  # Réduire à 24 si mémoire insuffisante
+        use_checkpoint=True  # Pour économiser la mémoire
         )
+        
         self.loss_fn = DiceCELoss(include_background=False, to_onehot_y=True, softmax=True)
         self.dice_metric = DiceHelper(
             include_background=False,
             softmax=True,
-            num_classes=6,
+            num_classes=4,
             reduction='none'
         )
 
@@ -72,7 +72,7 @@ class HemorrhageModel(pl.LightningModule):
         
         # Extraction des scores par classe
         dice_scores = {}
-        for class_idx in range(5):  # Classes 1-5
+        for class_idx in range(3):  # Classes 1-3
             dice_scores[f"dice_c{class_idx+1}"] = scores[0, class_idx].item()
         
         if isinstance(batch["image"].meta["filename_or_obj"], list):
