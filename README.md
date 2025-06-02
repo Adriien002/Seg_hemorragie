@@ -1,1 +1,1 @@
-Scripts sharing for hemorragie segmentation 
+Hemorraghe segmentation 
