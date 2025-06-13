@@ -7,7 +7,7 @@ from monai.data import DataLoader, PersistentDataset, Dataset
 from monai.inferers import sliding_window_inference
 from monai.losses import DiceCELoss
 from monai.metrics import DiceMetric, DiceHelper
-from monai.networks.nets import UNet
+from monai.networks.nets import UNet,SwinUNETR
 import monai.transforms as T
 from pytorch_lightning.loggers import TensorBoardLogger
 from torch.optim import SGD
@@ -19,7 +19,7 @@ warnings.filterwarnings("ignore", message="You are using `torch.load` with `weig
 # 1. CONFIGURATION
 # ======================
 DATASET_DIR = '/home/tibia/Projet_Hemorragie/mbh_seg/nii'
-SAVE_DIR = "/home/tibia/Projet_Hemorragie/MBH_2_log"
+SAVE_DIR = "/home/tibia/Projet_Hemorragie/MBH_swin_log_2"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
 # ======================
@@ -36,23 +36,31 @@ transforms = T.Compose([
     T.ScaleIntensityRanged(keys=["image"], a_min=-10, a_max=140, b_min=0.0, b_max=1.0, clip=True),  # clip images
 
     # Let's crop 2 patches per case using positive negative instead of class by class
-    #T.RandCropByPosNegLabeld(
-     #   keys=['image', 'seg'],
-      #  image_key='image',
-       # label_key='seg',
-        #pos=5.0,
-        #neg=1.0,
-        #spatial_size=(96, 96, 96),
-        #num_samples=2
-    #),
-    T.RandCropByLabelClassesd(
-    keys=["image", "seg"],
-    label_key="seg",
-    spatial_size=(96, 96, 96),  
-    num_classes=6,
-    ratios=[0.1, 0.3, 0.1, 0.1, 0.1, 0.1],  # + de poids pour les classes rares (classe 1 ici à 0.3 par ex)
-    num_samples=4, 
+    T.RandCropByPosNegLabeld(
+       keys=['image', 'seg'],
+       image_key='image',
+       label_key='seg',
+        pos=5.0,
+        neg=1.0,
+        spatial_size=(96, 96, 64),
+        num_samples=2
     ),
+    # T.RandCropByLabelClassesd(
+    #     keys=["image", "seg"],
+    #     label_key="seg",
+    #     spatial_size=(128, 128, 64),  # Taille adaptée aux EDH/SDH
+    #     num_classes=6,
+    #     ratios=[0.1, 0.25, 0.15, 0.1, 0.2, 0.2],  # Priorité EDH(1), SAH(2)
+    #     num_samples=4
+    # ),
+    # T.RandCropByLabelClassesd(
+    # keys=["image", "seg"],
+    # label_key="seg",
+    # spatial_size=(96, 96, 96),  
+    # num_classes=6,
+    # ratios=[0.1, 0.3, 0.1, 0.1, 0.1, 0.1],  # + de poids pour les classes rares (classe 1 ici à 0.3 par ex)
+    # num_samples=4, 
+    # ),
 
     # Data augmentations
     # For intensity augmentations, small random transforms but often
@@ -78,6 +86,20 @@ transforms = T.Compose([
         prob=0.5,
         spatial_axis=[0, 1]
     )
+    # T.RandAffined(
+    # keys=['image', 'seg'],
+    # prob=0.3,
+    # rotate_range=(0, 0, 0.1),  # Petite rotation seulement en axial (Z)
+    # scale_range=(0.1, 0.1, 0),  # Léger zoom dans le plan axial
+    # mode=['bilinear', 'nearest'],
+    # padding_mode='border'
+    # ),
+
+    # T.RandAdjustContrastd(
+    # keys=['image'],
+    # gamma=(0.7, 1.5),  # Gamme plus large pour capturer EDH subtils
+    # prob=0.5
+    # )
 ])
 
 val_transforms = T.Compose([
@@ -105,14 +127,13 @@ class HemorrhageModel(pl.LightningModule):
     def __init__(self, num_steps):
         super().__init__()
         self.num_steps = num_steps
-        self.model = UNet(
-            spatial_dims=3,
-            in_channels=1,
-            out_channels=6,
-            channels=(32, 64, 128, 256, 320, 320),
-            strides=(2, 2, 2, 2, 2),
-            num_res_units=2,
-        )
+        self.model = SwinUNETR(
+        img_size=(96, 96, 96),  
+        in_channels=1,
+        out_channels=6,
+        feature_size=48,  # Réduire à 24 si mémoire insuffisante
+        use_checkpoint=True  # Pour économiser la mémoire
+)
         self.loss_fn = DiceCELoss(include_background=False, to_onehot_y=True, softmax=True) # don't need to weight the dice ce loss
         self.dice_metric = DiceHelper(include_background=False,
                                       softmax=True,
@@ -206,7 +227,7 @@ def main():
         max_epochs=num_epochs,
         check_val_every_n_epoch=5,
         accelerator="auto",
-        devices=[1],
+        devices=[0],
         default_root_dir=SAVE_DIR,
         logger=TensorBoardLogger(
             save_dir=SAVE_DIR,

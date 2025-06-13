@@ -19,7 +19,7 @@ warnings.filterwarnings("ignore", message="You are using `torch.load` with `weig
 # 1. CONFIGURATION
 # ======================
 DATASET_DIR = '/home/tibia/Projet_Hemorragie/Seg_hemorragie/split_MONAI'
-SAVE_DIR = "/home/tibia/Projet_Hemorragie/v4_log_test"
+SAVE_DIR = "/home/tibia/Projet_Hemorragie/v1_log_test"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
 # ======================
@@ -157,7 +157,7 @@ class HemorrhageModel(pl.LightningModule):
 
     def configure_optimizers(self):
 
-        optimizer = SGD(self.parameters(), lr=1e-3, momentum=0.95, nesterov=True, weight_decay=0.00003)
+        optimizer = SGD(self.parameters(), lr=1e-3, momentum=0.989, nesterov=True, weight_decay=0.00003)
         scheduler = get_linear_schedule_with_warmup(optimizer,
                                                     num_warmup_steps=0,
                                                     num_training_steps=self.num_steps)
@@ -206,7 +206,7 @@ def main():
         max_epochs=num_epochs,
         check_val_every_n_epoch=5,
         accelerator="auto",
-        devices=[1],
+        devices=[0],
         default_root_dir=SAVE_DIR,
         logger=TensorBoardLogger(
             save_dir=SAVE_DIR,
