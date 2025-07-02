@@ -12,6 +12,174 @@ from tqdm import tqdm
 import os
 from timeit import default_timer as timer
 
+from torchmetrics.classification import MultilabelAUROC, MultilabelSpecificity, MultilabelRecall
+import torch
+
+# Configuration
+NUM_CLASSES = 6
+CLASS_NAMES = ['any', 'epidural', 'intraparenchymal', 'intraventricular', 'subarachnoid', 'subdural']
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+def train_epoch(model: torch.nn.Module,
+                dataloader: torch.utils.data.DataLoader,
+                loss_fn: torch.nn.Module,
+                optimizer: torch.optim.Optimizer,
+                device: torch.device = DEVICE):
+    
+    # Initialisation des métriques
+    auc_metric = MultilabelAUROC(num_labels=NUM_CLASSES, average=None).to(device)
+    specificity_metric = MultilabelSpecificity(num_labels=NUM_CLASSES, threshold=0.5, average=None).to(device)
+    recall_metric = MultilabelRecall(num_labels=NUM_CLASSES, threshold=0.5, average=None).to(device)
+    
+    mean_auc_metric = MultilabelAUROC(num_labels=NUM_CLASSES, average="macro").to(device)
+    mean_specificity_metric = MultilabelSpecificity(num_labels=NUM_CLASSES, threshold=0.5, average="macro").to(device)
+    mean_recall_metric = MultilabelRecall(num_labels=NUM_CLASSES, threshold=0.5, average="macro").to(device)
+    
+    model.train()
+    train_loss = 0.0
+    
+    for batch, (X, y) in enumerate(dataloader):
+        X, y = X.to(device), y.to(device)
+        
+        # Forward pass
+        y_logits = model(X)
+        loss = loss_fn(y_logits, y)
+        train_loss += loss.item()
+        
+        # zero grad
+        optimizer.zero_grad()
+
+        # Backward pass
+        loss.backward()
+
+        # Optimizer step
+        optimizer.step()
+        
+        
+        y_probs = torch.sigmoid(y_logits)
+        
+        # Update metrics
+        auc_metric.update(y_probs, y.int())
+        specificity_metric.update(y_probs, y.int())
+        recall_metric.update(y_probs, y.int())
+        
+        mean_auc_metric.update(y_probs, y.int())
+        mean_specificity_metric.update(y_probs, y.int())
+        mean_recall_metric.update(y_probs, y.int())
+        
+        if batch % 400 == 0:
+            print(f"Traité {batch * len(X)}/{len(dataloader.dataset)} échantillons")
+    
+    # Calcul des moyennes finales
+    train_loss /= len(dataloader)
+    auc_per_class = auc_metric.compute()
+    specificity_per_class = specificity_metric.compute()
+    recall_per_class = recall_metric.compute()
+    
+    mean_auc = mean_auc_metric.compute()
+    mean_specificity = mean_specificity_metric.compute()
+    mean_recall = mean_recall_metric.compute()
+    
+    # Affichage des résultats
+    print(f"\nTrain Loss: {train_loss:.5f}")
+    print(f"Mean AUC: {mean_auc:.4f} | Mean Specificity: {mean_specificity:.4f} | Mean Recall: {mean_recall:.4f}")
+    
+    for i, class_name in enumerate(CLASS_NAMES):
+        print(f"{class_name}: AUC={auc_per_class[i]:.4f}, Spec={specificity_per_class[i]:.4f}, Recall={recall_per_class[i]:.4f}")
+    
+    return train_loss, mean_auc.item(), mean_specificity.item(), mean_recall.item()
+
+def val_epoch(model: torch.nn.Module,
+              dataloader: torch.utils.data.DataLoader,
+              loss_fn: torch.nn.Module,
+              device: torch.device = DEVICE):
+    
+    # Initialisation des métriques (même structure que pour l'entraînement)
+    auc_metric = MultilabelAUROC(num_labels=NUM_CLASSES, average=None).to(device)
+    specificity_metric = MultilabelSpecificity(num_labels=NUM_CLASSES, threshold=0.5, average=None).to(device)
+    recall_metric = MultilabelRecall(num_labels=NUM_CLASSES, threshold=0.5, average=None).to(device)
+    
+    mean_auc_metric = MultilabelAUROC(num_labels=NUM_CLASSES, average="macro").to(device)
+    mean_specificity_metric = MultilabelSpecificity(num_labels=NUM_CLASSES, threshold=0.5, average="macro").to(device)
+    mean_recall_metric = MultilabelRecall(num_labels=NUM_CLASSES, threshold=0.5, average="macro").to(device)
+    
+    model.eval()
+    val_loss = 0.0
+    
+    with torch.no_grad():
+        for X, y in dataloader:
+            X, y = X.to(device), y.to(device)
+            
+            # Forward pass
+            y_logits = model(X)
+            loss = loss_fn(y_logits, y)
+            val_loss += loss.item()
+            
+            # Conversion en probabilités
+            y_probs = torch.sigmoid(y_logits)
+            
+            # Mise à jour des métriques
+            auc_metric.update(y_probs, y.int())
+            specificity_metric.update(y_probs, y.int())
+            recall_metric.update(y_probs, y.int())
+            
+            mean_auc_metric.update(y_probs, y.int())
+            mean_specificity_metric.update(y_probs, y.int())
+            mean_recall_metric.update(y_probs, y.int())
+    
+    # Calcul des moyennes finales
+    val_loss /= len(dataloader)
+    auc_per_class = auc_metric.compute()
+    specificity_per_class = specificity_metric.compute()
+    recall_per_class = recall_metric.compute()
+    
+    mean_auc = mean_auc_metric.compute()
+    mean_specificity = mean_specificity_metric.compute()
+    mean_recall = mean_recall_metric.compute()
+    
+    # Affichage des résultats
+    print(f"\nValidation Loss: {val_loss:.5f}")
+    print(f"Val Mean AUC: {mean_auc:.4f} | Val Mean Spec: {mean_specificity:.4f} | Val Mean Recall: {mean_recall:.4f}")
+    
+    for i, class_name in enumerate(CLASS_NAMES):
+        print(f"{class_name}: AUC={auc_per_class[i]:.4f}, Spec={specificity_per_class[i]:.4f}, Recall={recall_per_class[i]:.4f}")
+    
+    return val_loss, mean_auc.item(), mean_specificity.item(), mean_recall.item()
+
+
+def train_model(model, train_loader, val_loader, loss_fn, optimizer, epochs):
+    history = {
+        'train_loss': [], 'train_auc': [], 'train_spe': [], 'train_rec': [],
+        'val_loss': [], 'val_auc': [], 'val_spe': [], 'val_rec': []
+    }
+    
+    for epoch in range(epochs):
+        print(f"\nEpoch {epoch+1}/{epochs}")
+        print("-" * 50)
+        
+        # Training phase
+        train_loss, train_auc, train_spe, train_rec = train_epoch(
+            model, train_loader, loss_fn, optimizer, DEVICE
+        )
+        
+        # Validation phase
+        # print("Validation phase...")
+        # val_loss, val_auc, val_spe, val_rec = val_epoch(
+        #     model, val_loader, loss_fn, DEVICE
+        # )
+        
+        # Sauvegarde de l'historique
+        history['train_loss'].append(train_loss)
+        history['train_auc'].append(train_auc)
+        history['train_spe'].append(train_spe)
+        history['train_rec'].append(train_rec)
+        # history['val_loss'].append(val_loss)
+        # history['val_auc'].append(val_auc)
+        # history['val_spe'].append(val_spe)
+        # history['val_rec'].append(val_rec)
+    
+    return history
+
 
 def print_train_time(start: float, end: float, device: torch.device = None):
     """Print training time"""
