@@ -385,9 +385,9 @@ def main():
     print(f"Using device: {DEVICE}")
     
     # === Config ===
-    csv_train_path = Path("/home/tibia/Projet_Hemorragie/Seg_hemorragie/Classification_RSNA/data/csv/train_fold0.csv")
-    csv_val_path = Path("/home/tibia/Projet_Hemorragie/Seg_hemorragie/Classification_RSNA/data/csv/val_fold0.csv")
-    dicom_dir = Path("/home/tibia/Projet_Hemorragie/Seg_hemorragie/Classification_RSNA/data/rsna-intracranial-hemorrhage-detection/stage_2_train")
+    csv_train_path = Path("/home/tibia/Projet_Hemorragie/Seg_hemorragie/Classification/Classification_RSNA/data/csv/train_fold0.csv")
+    csv_val_path = Path("/home/tibia/Projet_Hemorragie/Seg_hemorragie/Classification/Classification_RSNA/data/csv/val_fold0.csv")
+    dicom_dir = Path("/home/tibia/Projet_Hemorragie/Seg_hemorragie/Classification/Classification_RSNA/data/rsna-intracranial-hemorrhage-detection/stage_2_train")
     train_cache_dir = Path("./persistent_cache/fold0_train")  
     val_cache_dir = Path("./persistent_cache/fold0_val")
     
