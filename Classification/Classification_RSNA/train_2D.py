@@ -15,11 +15,13 @@ from timeit import default_timer as timer
 from torchmetrics.classification import MultilabelAUROC, MultilabelSpecificity, MultilabelRecall, MultilabelPrecision, MultilabelAccuracy
 from torch.optim.lr_scheduler import ConstantLR, CosineAnnealingWarmRestarts, SequentialLR
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+import warnings
+warnings.filterwarnings("ignore", "You are using `torch.load` with `weights_only=False`*.")
 
 # Configuration
 NUM_CLASSES = 6
 CLASS_NAMES = ['any', 'epidural', 'intraparenchymal', 'intraventricular', 'subarachnoid', 'subdural']
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DEVICE = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
 
 
 def print_train_time(start: float, end: float, device: torch.device = None):
@@ -152,22 +154,34 @@ def create_transforms():
     return train_transforms
 
 
+# def prepare_data(csv_path, dicom_dir, label_cols):
+#     """Prepare data list for MONAI"""
+#     df = pd.read_csv(csv_path)
+    
+#     data_list = [
+#         {
+#             "image": str(dicom_dir / row['filename']),
+#             "label": np.array([row[col] for col in label_cols], dtype=np.float32)
+#         }
+#         for _, row in df.iterrows()
+#     ]
+    
+#     return data_list
+
 def prepare_data(csv_path, dicom_dir, label_cols):
     """Prepare data list for MONAI"""
     df = pd.read_csv(csv_path)
     
+   
     data_list = [
         {
-            "image": str(dicom_dir / row['filename']),
-            "label": np.array([row[col] for col in label_cols], dtype=np.float32)
+            "image": str(dicom_dir / row.filename),
+            "label": np.array([getattr(row, col) for col in label_cols], dtype=np.float32)
         }
-        for _, row in df.iterrows()
+        for row in df.itertuples(index=False) # itertuples est plus rapide que iterrows?
     ]
     
     return data_list
-
-
-
 
 
 
@@ -178,20 +192,13 @@ def train_epoch(model: torch.nn.Module,
                 optimizer: torch.optim.Optimizer,
                 scheduler: torch.optim.lr_scheduler,
                 device: torch.device = DEVICE):
+   
+    # mean_auc_metric = MultilabelAUROC(num_labels=NUM_CLASSES, average="macro").to(device)
+    # mean_recall_metric = MultilabelRecall(num_labels=NUM_CLASSES, threshold=0.5, average="macro").to(device)
+    # mean_precision_metric = MultilabelPrecision(num_labels=NUM_CLASSES, threshold=0.5, average="macro").to(device)
+    # # keep the per-class metrics for detailed analysis : only 1 beaucause memory is limited
+    # auc_metric = MultilabelAUROC(num_labels=NUM_CLASSES, average=None).to(device)
     
-    # Initialisation des métriques
-    auc_metric = MultilabelAUROC(num_labels=NUM_CLASSES, average=None).to(device)
-    specificity_metric = MultilabelSpecificity(num_labels=NUM_CLASSES, threshold=0.5, average=None).to(device)
-    recall_metric = MultilabelRecall(num_labels=NUM_CLASSES, threshold=0.5, average=None).to(device)
-    precision_metric = MultilabelPrecision(num_labels=NUM_CLASSES, threshold=0.5, average=None).to(device)
-    accuracy_metric = MultilabelAccuracy(num_labels=NUM_CLASSES, average=None).to(device)
-    
-    mean_auc_metric = MultilabelAUROC(num_labels=NUM_CLASSES, average="macro").to(device)
-    mean_specificity_metric = MultilabelSpecificity(num_labels=NUM_CLASSES, threshold=0.5, average="macro").to(device)
-    mean_recall_metric = MultilabelRecall(num_labels=NUM_CLASSES, threshold=0.5, average="macro").to(device)
-    mean_precision_metric = MultilabelPrecision(num_labels=NUM_CLASSES, threshold=0.5, average="macro").to(device)
-    mean_accuracy_metric = MultilabelAccuracy(num_labels=NUM_CLASSES, average="macro").to(device)  
-
     model.train()
     train_loss = 0.0
     
@@ -213,66 +220,58 @@ def train_epoch(model: torch.nn.Module,
         # Optimizer step
         optimizer.step()
         
-        
-        
-        y_probs = torch.sigmoid(y_logits)
-        
-        # Update metrics
-        auc_metric.update(y_probs, y.int())
-        specificity_metric.update(y_probs, y.int())
-        recall_metric.update(y_probs, y.int())
-        precision_metric.update(y_probs, y.int())
-        accuracy_metric.update(y_probs, y.int())
-        
-        mean_auc_metric.update(y_probs, y.int())
-        mean_specificity_metric.update(y_probs, y.int())
-        mean_recall_metric.update(y_probs, y.int())
-        mean_precision_metric.update(y_probs, y.int())
-        mean_accuracy_metric.update(y_probs, y.int())
+        # Conversion en probabilités avec détachement du graphe
+        # with torch.no_grad():
+        #     y_probs = torch.sigmoid(y_logits)
+            
+        #     # Update metricse
+        #     mean_auc_metric.update(y_probs, y.int())
+        #     mean_recall_metric.update(y_probs, y.int())
+        #     mean_precision_metric.update(y_probs, y.int())
+        #     auc_metric.update(y_probs, y.int())
         
         if (i % 400 == 0):
             print(f"Looked at {i * len(X)}/{len(dataloader.dataset)} samples")
     
     # Calcul des moyennes finales
     train_loss /= len(dataloader)
-    auc_per_class = auc_metric.compute()
-    specificity_per_class = specificity_metric.compute()
-    recall_per_class = recall_metric.compute()
-    precision_per_class = precision_metric.compute()
-    accuracy_per_class = accuracy_metric.compute()
     
-    mean_auc = mean_auc_metric.compute()
-    mean_specificity = mean_specificity_metric.compute()
-    mean_recall = mean_recall_metric.compute()
-    mean_precision = mean_precision_metric.compute()
-    mean_accuracy = mean_accuracy_metric.compute()
+    # Compute 
+    # mean_auc = mean_auc_metric.compute()
+    # mean_recall = mean_recall_metric.compute()
+    # mean_precision = mean_precision_metric.compute()
+    # auc_per_class = auc_metric.compute()
+    
+    # # Reset to free memory
+    # mean_auc_metric.reset()
+    # mean_recall_metric.reset()
+    # mean_precision_metric.reset()
+    # auc_metric.reset()
+    
+    # # Conversion en float pour éviter de garder les tenseurs en mémoire
+    # mean_auc_val = mean_auc.item()
+    # mean_recall_val = mean_recall.item()
+    # mean_precision_val = mean_precision.item()
     
     # Affichage des résultats
-    print(f"\nTrain Loss: {train_loss:.5f}")
-    print(f"Mean AUC: {mean_auc:.4f} | Mean Specificity: {mean_specificity:.4f} | Mean Recall: {mean_recall:.4f}")
+    # print(f"\nTrain Loss: {train_loss:.5f}")
+    # print(f"Mean AUC: {mean_auc_val:.4f} | Mean Recall: {mean_recall_val:.4f} | Mean Precision: {mean_precision_val:.4f}")
     
-    for i, class_name in enumerate(CLASS_NAMES):
-        print(f"{class_name}: AUC={auc_per_class[i]:.4f}, Spec={specificity_per_class[i]:.4f}, Recall={recall_per_class[i]:.4f}")
+    # for i, class_name in enumerate(CLASS_NAMES):
+    #     print(f"{class_name}: AUC={auc_per_class[i]:.4f}")
     
-    return train_loss, mean_auc.item(), mean_specificity.item(), mean_recall.item(), mean_precision.item(), mean_accuracy.item()
+    return train_loss
 
 def val_epoch(model: torch.nn.Module,
               dataloader: torch.utils.data.DataLoader,
               loss_fn: torch.nn.Module,
               device: torch.device = DEVICE):
     
-    # Initialisation des métriques (même structure que pour l'entraînement)
-    auc_metric = MultilabelAUROC(num_labels=NUM_CLASSES, average=None).to(device)
-    specificity_metric = MultilabelSpecificity(num_labels=NUM_CLASSES, threshold=0.5, average=None).to(device)
-    recall_metric = MultilabelRecall(num_labels=NUM_CLASSES, threshold=0.5, average=None).to(device)
-    precision_metric = MultilabelPrecision(num_labels=NUM_CLASSES, threshold=0.5, average=None).to(device)
-    accuracy_metric = MultilabelAccuracy(num_labels=NUM_CLASSES, average=None).to(device)
-    
+    # Métriques simplifiées (même structure que pour l'entraînement)
     mean_auc_metric = MultilabelAUROC(num_labels=NUM_CLASSES, average="macro").to(device)
-    mean_specificity_metric = MultilabelSpecificity(num_labels=NUM_CLASSES, threshold=0.5, average="macro").to(device)
     mean_recall_metric = MultilabelRecall(num_labels=NUM_CLASSES, threshold=0.5, average="macro").to(device)
     mean_precision_metric = MultilabelPrecision(num_labels=NUM_CLASSES, threshold=0.5, average="macro").to(device)
-    mean_accuracy_metric = MultilabelAccuracy(num_labels=NUM_CLASSES, average="macro").to(device)
+    auc_metric = MultilabelAUROC(num_labels=NUM_CLASSES, average=None).to(device)
     
     model.eval()
     val_loss = 0.0
@@ -291,52 +290,48 @@ def val_epoch(model: torch.nn.Module,
             y_probs = torch.sigmoid(y_logits)
             
             # Mise à jour des métriques
-            auc_metric.update(y_probs, y.int())
-            specificity_metric.update(y_probs, y.int())
-            recall_metric.update(y_probs, y.int())
-            precision_metric.update(y_probs, y.int())
-            accuracy_metric.update(y_probs, y.int())
-            
             mean_auc_metric.update(y_probs, y.int())
-            mean_specificity_metric.update(y_probs, y.int())
             mean_recall_metric.update(y_probs, y.int())
             mean_precision_metric.update(y_probs, y.int())
-            mean_accuracy_metric.update(y_probs, y.int())
+            auc_metric.update(y_probs, y.int())
     
     # Calcul des moyennes finales
     val_loss /= len(dataloader)
-    auc_per_class = auc_metric.compute()
-    specificity_per_class = specificity_metric.compute()
-    recall_per_class = recall_metric.compute()
-    precision_per_class = precision_metric.compute()
-    accuracy_per_class = accuracy_metric.compute()
     
+    # Compute 
     mean_auc = mean_auc_metric.compute()
-    mean_specificity = mean_specificity_metric.compute()
     mean_recall = mean_recall_metric.compute()
     mean_precision = mean_precision_metric.compute()
-    mean_accuracy = mean_accuracy_metric.compute()
+    auc_per_class = auc_metric.compute()
+    
+    # Reset to free memory
+    mean_auc_metric.reset()
+    mean_recall_metric.reset()
+    mean_precision_metric.reset()
+    auc_metric.reset()
+    
+    # Conversion en float
+    mean_auc_val = mean_auc.item()
+    mean_recall_val = mean_recall.item()
+    mean_precision_val = mean_precision.item()
     
     # Affichage des résultats
     print(f"\nValidation Loss: {val_loss:.5f}")
-    print(f"Val Mean AUC: {mean_auc:.4f} | Val Mean Spec: {mean_specificity:.4f} | Val Mean Recall: {mean_recall:.4f}")
+    print(f"Val Mean AUC: {mean_auc_val:.4f} | Val Mean Recall: {mean_recall_val:.4f} | Val Mean Precision: {mean_precision_val:.4f}")
     
     for i, class_name in enumerate(CLASS_NAMES):
-        print(f"{class_name}: AUC={auc_per_class[i]:.4f}, Spec={specificity_per_class[i]:.4f}, Recall={recall_per_class[i]:.4f}")
+        print(f"{class_name}: AUC={auc_per_class[i]:.4f}")
     
-    return val_loss, mean_auc.item(), mean_specificity.item(), mean_recall.item(), mean_precision.item(), mean_accuracy.item()
-
-
+    return val_loss, mean_auc_val, mean_recall_val, mean_precision_val
+    
 def train_model(model, train_loader, val_loader, loss_fn, optimizer, epochs):
+    # Historique simplifié - on garde les métriques les plus importantes
     history = {
-        'train_loss': [], 'train_auc': [], 'train_spe': [], 'train_rec': [], 'train_prec': [], 'train_acc': [],
-        'val_loss': [], 'val_auc': [], 'val_spe': [], 'val_rec': [], 'val_prec': [], 'val_acc': []
+        'train_loss': [],
+        'val_loss': [], 'val_auc': [], 'val_recall': [], 'val_precision': []
     }
     
-    for epoch in tqdm(range(epochs), desc="Training Epochs"):
-        print(f"\nEpoch {epoch+1}/{epochs}")
-        print("-" * 50)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, 
         mode='max',          # Maximize AUC
         factor=0.1,          # Dividing 10 times
@@ -344,35 +339,42 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer, epochs):
         verbose=True        
     )
     
+    for epoch in tqdm(range(epochs), desc="Training Epochs"):
+        print(f"\nEpoch {epoch+1}/{epochs}")
+        print("-" * 50)
         
         # Training phase
-        train_loss, train_auc, train_spe, train_rec, train_prec, train_acc = train_epoch(  
-            model, train_loader, loss_fn, optimizer, DEVICE
+        train_loss = train_epoch(  
+            model, train_loader, loss_fn, optimizer, scheduler, DEVICE
         )
         
         # Validation phase
-        val_loss, val_auc, val_spe, val_rec, val_prec, val_acc = val_epoch(  
+        val_loss, val_auc, val_recall, val_precision = val_epoch(  
             model, val_loader, loss_fn, DEVICE
         )
+        
         scheduler.step(val_auc)  
 
         # Sauvegarde de l'historique
         history['train_loss'].append(train_loss)
-        history['train_auc'].append(train_auc)
-        history['train_spe'].append(train_spe)
-        history['train_rec'].append(train_rec)
-        history['train_prec'].append(train_prec)  
-        history['train_acc'].append(train_acc)  
+        # history['train_auc'].append(train_auc)
+        # history['train_recall'].append(train_recall)
+        # history['train_precision'].append(train_precision)
         
         history['val_loss'].append(val_loss)
         history['val_auc'].append(val_auc)
-        history['val_spe'].append(val_spe)
-        history['val_rec'].append(val_rec)
-        history['val_prec'].append(val_prec)  
-        history['val_acc'].append(val_acc)  
+        history['val_recall'].append(val_recall)
+        history['val_precision'].append(val_precision)
+        
+        # Nettoyage mémoire GPU périodique
+        if epoch % 10 == 0:
+            torch.cuda.empty_cache()
     
     return history
-
+  
+ 
+       
+    
 def main():
     """Main training function"""
     # === Hyperparams ===
@@ -380,7 +382,8 @@ def main():
     BATCH_SIZE = 32
     EPOCHS = 80
     LR = 1e-3
-    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+   
+
     
     print(f"Using device: {DEVICE}")
     
@@ -388,8 +391,8 @@ def main():
     csv_train_path = Path("/home/tibia/Projet_Hemorragie/Seg_hemorragie/Classification/Classification_RSNA/data/csv/train_fold0.csv")
     csv_val_path = Path("/home/tibia/Projet_Hemorragie/Seg_hemorragie/Classification/Classification_RSNA/data/csv/val_fold0.csv")
     dicom_dir = Path("/home/tibia/Projet_Hemorragie/Seg_hemorragie/Classification/Classification_RSNA/data/rsna-intracranial-hemorrhage-detection/stage_2_train")
-    train_cache_dir = Path("./persistent_cache/fold0_train")  
-    val_cache_dir = Path("./persistent_cache/fold0_val")
+    train_cache_dir = Path("./persistent_cache1/fold0_train")  
+    val_cache_dir = Path("./persistent_cache1/fold0_val")
     
     label_cols = ['any', 'epidural', 'intraparenchymal', 'intraventricular', 'subarachnoid', 'subdural']
     
@@ -414,7 +417,10 @@ def main():
         transform=train_transforms,
         cache_dir=str(val_cache_dir),
     )
-    
+    # train_dataset = Dataset(data=data_train_list, transform=train_transforms)
+    # val_dataset = Dataset(data=data_val_list, transform=train_transforms)
+
+
     print(f"training dataset ready with {len(train_dataset)} samples and cached transforms at {train_cache_dir}")
     print(f"validation dataset ready with {len(val_dataset)} samples and cached transforms at {val_cache_dir}")
     
@@ -427,6 +433,14 @@ def main():
         persistent_workers=True,
         pin_memory=True
     )
+
+#     train_loader = DataLoader(
+#     train_dataset, 
+#     batch_size=BATCH_SIZE, 
+#     shuffle=True, 
+#     num_workers=4,     # ← essentiel
+#     pin_memory=False,  # ← pour l’instant, on désactive tout
+# )
 
     val_loader = DataLoader(
         val_dataset, 
@@ -454,10 +468,15 @@ def main():
     # === Optimizer ===
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
     
-   
+    
+    # for i, batch in enumerate(train_loader):
+    #     print(f"Batch {i} loaded")
+    
+    #     if i * BATCH_SIZE >= 202400:
+    #         print(f"✅ At batch {i}, we reached ~sample 102400 without crash")
+    #         break
 
-
-    # === Training Loop ===
+    # # === Training Loop ===
     print("Starting training...")
     torch.manual_seed(42)
     torch.cuda.manual_seed(42)
