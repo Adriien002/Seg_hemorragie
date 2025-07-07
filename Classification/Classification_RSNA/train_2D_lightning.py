@@ -20,22 +20,22 @@ from pytorch_lightning.loggers import TensorBoardLogger
 # === Hyperparams ===
 NUM_CLASSES = 6
 BATCH_SIZE = 32
-EPOCHS = 1000
+EPOCHS = 80
 LR = 1e-3
 CLASS_NAMES = ['any', 'epidural', 'intraparenchymal', 'intraventricular', 'subarachnoid', 'subdural']
 DEVICE = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
 SAVE_DIR = "/home/tibia/Projet_Hemorragie/MBH_2D_Classif"
 
 class ClassifierModule(pl.LightningModule):
-    def __init__(self, config):
+    def __init__(self, config = None):
         super().__init__()
         self.save_hyperparameters()
 
-        self.num_classes = config["model"]["num_classes"]
+        self.num_classes = NUM_CLASSES
         self.class_names = CLASS_NAMES
 
         # Dynamically get the model from torchvision.models
-        self.model = self._get_model(config["model"])
+        self.model = self._get_model()
 
         # Get positional weights
         self.loss_fn = self._get_lossfn()
@@ -49,17 +49,18 @@ class ClassifierModule(pl.LightningModule):
         self.val_mean_precision = MultilabelPrecision(num_labels=self.num_classes, threshold=0.5)
         self.val_mean_recall = MultilabelRecall(num_labels=self.num_classes, threshold=0.5)
 
-    @staticmethod
-    def _get_model():
+   
+    def _get_model(self):
         return ResNet(
-        block='basic',
-        layers=[1, 1, 1, 1],
-        block_inplanes=[32, 64, 128, 256],
-        spatial_dims=3,
-        n_input_channels=1,
+        block='basic',           # BasicBlock for ResNet18/34
+        layers=[2, 2, 2, 2],    # ResNet18 architecture
+        block_inplanes=[64, 128, 256, 512],
+        spatial_dims=2,
+        n_input_channels=1,     # Input = Scan
         num_classes=NUM_CLASSES,
         conv1_t_size=7,
-        conv1_t_stride=(2, 2, 2)
+        conv1_t_stride=2
+    
     ).to(DEVICE)
 
     def _get_lossfn(self):
@@ -74,11 +75,7 @@ class ClassifierModule(pl.LightningModule):
         y_hat = self.model(x)
         loss = self.loss_fn(y_hat, y)
 
-        # Log the learning rate and training loss
-        lr = self.trainer.lr_scheduler_configs[0].scheduler.optimizer.param_groups[0]["lr"]
-        self.log("lr", lr, on_step=True, on_epoch=False, prog_bar=True)
-        self.log('trn_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
-
+        
         return loss
     
 
@@ -158,7 +155,7 @@ class ClassifierModule(pl.LightningModule):
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
-                "monitor": "mean_auc ", 
+                "monitor": "mean_auc", 
                 "interval": "epoch",
                 "frequency": 1
         }
@@ -175,7 +172,7 @@ def prepare_data(csv_path, dicom_dir, label_cols):
             "image": str(dicom_dir / row.filename),
             "label": np.array([row[col] for col in label_cols], dtype=np.float32)
         }
-        for row in df.itertuples(index=False) # itertuples est plus rapide que iterrows?
+        for _, row in df.iterrows() # itertuples est plus rapide que iterrows?
     ]
     
         return data_list
@@ -195,11 +192,13 @@ def create_transforms():
             clip=True
         ),
         T.EnsureChannelFirstd(keys=["image"]),
-        T.ResizeD(keys=["image"], spatial_size=(224, 224)),
+        T.Resized(keys=["image"], spatial_size=(224, 224)),
         T.ToTensord(keys=["image", "label"])  
     ])
     
     return train_transforms
+
+
 def main():
     csv_train_path = Path("/home/tibia/Projet_Hemorragie/Seg_hemorragie/Classification/Classification_RSNA/data/csv/train_fold0.csv")
     csv_val_path = Path("/home/tibia/Projet_Hemorragie/Seg_hemorragie/Classification/Classification_RSNA/data/csv/val_fold0.csv")
@@ -220,7 +219,7 @@ def main():
     
     # === Create Dataset ===
     train_dataset = PersistentDataset(
-    ata=data_train_list,
+    data=data_train_list,
     transform=train_transforms,
     cache_dir=str(train_cache_dir),
     )
