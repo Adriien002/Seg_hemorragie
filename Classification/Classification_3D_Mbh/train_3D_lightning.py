@@ -27,7 +27,7 @@ EPOCHS = 80
 LR = 1e-3
 CLASS_NAMES = ['any', 'epidural', 'intraparenchymal', 'intraventricular', 'subarachnoid', 'subdural']
 DEVICE = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
-SAVE_DIR = "/home/tibia/Projet_Hemorragie/MBH_2D_Classif"
+SAVE_DIR = "/home/tibia/Projet_Hemorragie/MBH_3D_Classif"
 
 class ClassifierModule(pl.LightningModule):
     def __init__(self, config = None):
@@ -55,16 +55,14 @@ class ClassifierModule(pl.LightningModule):
    
     def _get_model(self):
         return ResNet(
-        block='basic',           # BasicBlock for ResNet18/34
-        layers=[2, 2, 2, 2],    # ResNet18 architecture
-        block_inplanes=[64, 128, 256, 512],
-        spatial_dims=2,
-        n_input_channels=1,     # Input = Scan
+        block='basic',
+        layers=[1, 1, 1, 1],        # Beaucoup moins de couches (vs [2,2,2,2])
+        block_inplanes=[32, 64, 128, 256],  # Moins de channels (vs [64,128,256,512])
+        spatial_dims=3,
+        n_input_channels=1,
         num_classes=NUM_CLASSES,
         conv1_t_size=7,
-        conv1_t_stride=2 
-        
-    
+        conv1_t_stride=(2, 2, 2)    # Stride dans les 3 dimensions
     ).to(DEVICE)
 
     def _get_lossfn(self):
@@ -78,11 +76,11 @@ class ClassifierModule(pl.LightningModule):
         x, y = batch['image'], batch['label']
         y_hat = self.model(x)
         loss = self.loss_fn(y_hat, y)
-
+        self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
         
         return loss
     
-
+    
     def validation_step(self, batch, batch_idx):
         x, y = batch['image'], batch['label']
         y_hat = self.model(x)
@@ -98,6 +96,7 @@ class ClassifierModule(pl.LightningModule):
         self.val_mean_recall.update(y_pred, y.int())
 
         self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True)
+        
         return loss
 
     def on_validation_epoch_end(self):
@@ -132,8 +131,8 @@ class ClassifierModule(pl.LightningModule):
         self.val_mean_auc.reset()
         self.val_mean_precision.reset()
         self.val_mean_recall.reset()
-
-    
+        
+        
     def configure_optimizers(self):
    
 
@@ -160,35 +159,109 @@ class ClassifierModule(pl.LightningModule):
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
-                "monitor": 'val_loss', 
+                "monitor": "val_loss", 
                 "interval": "epoch",
                 "frequency": 1
         }
     }
-        
-        
-# On reprends logiaue code sans lightning
-def prepare_data(csv_path, dicom_dir, label_cols):
+    
 
-        df = pd.read_csv(csv_path)
+
+def main():
+    # ---- Config ----
+    csv_path = Path("/home/tibia/Projet_Hemorragie/MBH_label_case/splits/train_split.csv")
+    nii_dir = Path("/home/tibia/Projet_Hemorragie/MBH_label_case")
+    cache_dir = Path("./persistent_cache/3D_train_cache")  
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    label_cols = ['any', 'epidural', 'intraparenchymal', 'intraventricular', 'subarachnoid', 'subdural']
+    df = pd.read_csv(csv_path)
+
+# ---- Build MONAI-style data list ----
+    data_list = [
+        {
+        "image": str(nii_dir / f"{row['patientID_studyID']}.nii.gz"),
+        "label": np.array([row[col] for col in label_cols], dtype=np.float32)
+    }
+        for _, row in df.iterrows()
+]
+
+# ---- Transforms CORRIGÉES ----
+    window_preset = {"window_center": 40, "window_width": 80}
+
+    train_transforms = T.Compose([
+    # Load image only
+        T.LoadImaged(keys=["image"], image_only=True),  
+        T.EnsureChannelFirstd(keys=["image"]),
+    
+    # Harmonisation spatiale
+        T.Orientationd(keys=["image"], axcodes='RAS'),
+        T.Spacingd(keys=["image"], pixdim=(1.0, 1.0, 1.0), mode="bilinear"),
     
    
-        data_list = [
-        {
-            "image": str(dicom_dir / row.filename),
-            "label": np.array([row[col] for col in label_cols], dtype=np.float32)
-        }
-        for _, row in df.iterrows() # itertuples est plus rapide que iterrows?
-    ]
+        T.ResizeWithPadOrCropd(
+            keys=["image"], 
+            spatial_size=(224, 224, 144),
+            mode="constant",  # Padding avec des zéros
+            constant_values=0
+    ),
     
-        return data_list
+    # Intensity normalization
+        T.ScaleIntensityRanged(
+            keys=["image"],
+            a_min=window_preset["window_center"] - window_preset["window_width"] // 2,
+            a_max=window_preset["window_center"] + window_preset["window_width"] // 2,
+            b_min=0.0,
+            b_max=1.0,
+            clip=True
+    ),
 
-def create_transforms():
-    """Create training transforms"""
-    window_preset = {"window_center": 40, "window_width": 80}
-    
-    train_transforms = T.Compose([
-        T.LoadImaged(keys=["image"], image_only=True),
+    # Augmentations
+        T.RandFlipd(keys=["image"], spatial_axis=[0, 1, 2], prob=0.5),
+        T.RandRotate90d(keys=["image"], spatial_axes=(0, 1), prob=0.5),
+        T.RandScaleIntensityd(keys=["image"], factors=0.1, prob=0.5),
+        T.RandShiftIntensityd(keys=["image"], offsets=0.1, prob=0.5),
+
+    # Final tensor
+        T.ToTensord(keys=["image", "label"])
+])
+
+# ---- PersistentDataset ----
+    train_dataset = PersistentDataset(
+        data=data_list,
+        transform=train_transforms,
+        cache_dir=str(cache_dir),
+)
+
+    print(f"Dataset ready with {len(train_dataset)} samples and cached transforms at {cache_dir}")
+
+# Test pour vérifier les tailles
+    print("Vérification des tailles des premières images:")
+    for i in range(min(3, len(train_dataset))):
+        sample = train_dataset[i]
+        print(f"Image {i}: {sample['image'].shape}, Label: {sample['label'].shape}")
+
+
+
+
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=BATCH_SIZE, 
+        shuffle=True, 
+        num_workers=8,
+        persistent_workers=True,
+        pin_memory=True
+)
+
+    print(f"Using device: {DEVICE}")
+    print(f"Number of Batches in the dataset: {len(train_loader)}")
+
+    val_transforms = T.Compose([
+        T.LoadImaged(keys=["image"], image_only=True),  
+        T.EnsureChannelFirstd(keys=["image"]),
+        T.Orientationd(keys=["image"], axcodes='RAS'),
+        T.Spacingd(keys=["image"], pixdim=(1.0, 1.0, 1.0), mode="bilinear"),
+        T.ResizeWithPadOrCropd(keys=["image"], spatial_size=(224, 224, 144), mode="constant", constant_values=0),
         T.ScaleIntensityRanged(
             keys=["image"],
             a_min=window_preset["window_center"] - window_preset["window_width"] // 2,
@@ -197,83 +270,45 @@ def create_transforms():
             b_max=1.0,
             clip=True
         ),
-        T.EnsureChannelFirstd(keys=["image"]),
-        T.Resized(keys=["image"], spatial_size=(224, 224)),
-        T.ToTensord(keys=["image", "label"])  
-    ])
-    
-    return train_transforms
+        T.ToTensord(keys=["image", "label"])
+])
 
+# === Validation dataset ===
+    val_csv_path = Path("/home/tibia/Projet_Hemorragie/MBH_label_case/splits/val_split.csv")
+    val_df = pd.read_csv(val_csv_path)
 
-def main():
-    csv_train_path = Path("/home/tibia/Projet_Hemorragie/Seg_hemorragie/Classification/Classification_RSNA/data/csv/train_fold0.csv")
-    csv_val_path = Path("/home/tibia/Projet_Hemorragie/Seg_hemorragie/Classification/Classification_RSNA/data/csv/val_fold0.csv")
-    dicom_dir = Path("/home/tibia/Projet_Hemorragie/Seg_hemorragie/Classification/Classification_RSNA/data/rsna-intracranial-hemorrhage-detection/stage_2_train")
-    train_cache_dir = Path("./persistent_cache2/fold0_train")  
-    val_cache_dir = Path("./persistent_cache2/fold0_val")
-    
-    label_cols = ['any', 'epidural', 'intraparenchymal', 'intraventricular', 'subarachnoid', 'subdural']
-    
-    # === Prepare Data ===
-    print("Preparing data...")
-    data_train_list = prepare_data(csv_train_path, dicom_dir, label_cols)
-    data_val_list = prepare_data(csv_val_path, dicom_dir, label_cols)
+    val_data_list = [
+        {
+        "image": str(nii_dir / f"{row['patientID_studyID']}.nii.gz"),
+        "label": np.array([row[col] for col in label_cols], dtype=np.float32)
+        }
+        for _, row in val_df.iterrows()
+]
 
-    
-    # === Create Transforms ===
-    train_transforms = create_transforms()
-    
-    # === Create Dataset ===
-    train_dataset = PersistentDataset(
-    data=data_train_list,
-    transform=train_transforms,
-    cache_dir=str(train_cache_dir),
-    )
+    val_cache_dir = Path("./persistent_cache/3D_val_cache")
+    val_cache_dir.mkdir(parents=True, exist_ok=True)
 
     val_dataset = PersistentDataset(
-    data=data_val_list,
-    transform=train_transforms,
-    cache_dir=str(val_cache_dir),
-    )
-    # train_dataset = Dataset(data=data_train_list, transform=train_transforms)
-    # val_dataset = Dataset(data=data_val_list, transform=train_transforms)
-
-
-    print(f"training dataset ready with {len(train_dataset)} samples and cached transforms at {train_cache_dir}")
-    print(f"validation dataset ready with {len(val_dataset)} samples and cached transforms at {val_cache_dir}")
-    
-    # === Create DataLoader ===
-    train_loader = DataLoader(
-        train_dataset, 
-        batch_size=BATCH_SIZE, 
-        shuffle=True, 
-        num_workers=8,
-        persistent_workers=True,
-        pin_memory=True
-    )
-
-
-
+        data=val_data_list,
+        transform=val_transforms, 
+        cache_dir=str(val_cache_dir),
+)
     val_loader = DataLoader(
         val_dataset, 
         batch_size=BATCH_SIZE, 
-        shuffle=False,  
+        shuffle=False, 
         num_workers=8,
         persistent_workers=True,
         pin_memory=True
-    )
-    
-    print(f"Number of Batches in the training dataset: {len(train_loader)}")
-    print(f"Number of Batches in the validation dataset: {len(val_loader)}")
-
-
+)
+    print(f"Validation dataset ready with {len(val_dataset)} samples and cached transforms at {val_cache_dir}")
 
     model =ClassifierModule()
     
     trainer = pl.Trainer(
         max_epochs=EPOCHS,
         accelerator="auto",
-        devices=[0],
+        devices=[1],
         default_root_dir=SAVE_DIR,
         logger=TensorBoardLogger(
             save_dir=SAVE_DIR,
@@ -282,7 +317,6 @@ def main():
     )
 
     trainer.fit(model, train_loader, val_loader)
-    
 
 
 if __name__ == "__main__":
