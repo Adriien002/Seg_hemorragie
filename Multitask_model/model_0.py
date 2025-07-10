@@ -129,8 +129,12 @@ def get_multitask_transforms():
         T.RandScaleIntensityd(keys=['image'], factors=0.02, prob=0.5),
         T.RandShiftIntensityd(keys=['image'], offsets=0.05, prob=0.5),
         T.RandRotate90d(keys=['image', 'seg'], prob=0.5, max_k=2, spatial_axes=(0, 1)),
-        T.RandFlipd(keys=['image', 'seg'], prob=0.5, spatial_axis=[0, 1])
+        T.RandFlipd(keys=['image', 'seg'], prob=0.5, spatial_axis=[0, 1]),
+
+
+       # T.ToTensord(keys=["image", "seg", "label"]) 
     ])
+    
     
     val_transforms = T.Compose([
         T.LoadImaged(keys=["image", "seg"]),
@@ -147,6 +151,7 @@ def get_multitask_transforms():
             b_max=1.0,
             clip=True
         ),
+        #T.ToTensord(keys=["image", "seg", "label"]) 
     ])
     
     return train_transforms, val_transforms
@@ -422,6 +427,7 @@ def main():
         ),
         gradient_clip_val=1.0,  # Gradient clipping pour la stabilité
         log_every_n_steps=50
+        accumulate_grad_batches=4 # Ajout car pour gérer les petites tailles de batch ( dues à limitation mémoire)
     )
     
     # Entraînement
