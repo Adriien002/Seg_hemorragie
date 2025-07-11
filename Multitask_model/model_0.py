@@ -37,35 +37,60 @@ CLASS_NAMES = ['any', 'epidural', 'intraparenchymal', 'intraventricular', 'subar
 # ======================
 # MULTI-TASK NETWORK
 # ======================
-class MultiTaskHemorrhageNet(nn.Module):
-    def __init__(self, num_seg_classes=6, num_cls_classes=6):
+# But est de partager l'encodeur entre les deux tâches, donc modifié le Unet de base de MONAI
+
+
+
+from collections.abc import Sequence
+from typing import Optional
+
+import torch
+import torch.nn as nn
+
+from monai.networks.blocks import Convolution, UpSample
+from monai.networks.layers.factories import Conv, Pool
+from monai.networks.nets.basic_unet import TwoConv, Down, UpCat
+from monai.utils import ensure_tuple_rep
+
+
+class BasicUNetWithClassification(nn.Module):
+    def __init__(
+        self,
+        spatial_dims: int = 3,
+        in_channels: int = 1,
+        out_channels: int = 6,  # pour segmentation
+        num_cls_classes: int = 6,  # pour classification
+        features: Sequence[int] = (32, 32, 64, 128, 256, 32),
+        act: str | tuple = ("LeakyReLU", {"negative_slope": 0.1, "inplace": True}),
+        norm: str | tuple = ("instance", {"affine": True}),
+        bias: bool = True,
+        dropout: float | tuple = 0.0,
+        upsample: str = "deconv",
+    ):
         super().__init__()
-        
-        # Encodeur partagé basé sur UNet
-        self.shared_encoder = UNet(
-            spatial_dims=3,
-            in_channels=1,
-            out_channels=32,  # Features intermédiaires
-            channels=(32, 64, 128, 256, 320),
-            strides=(2, 2, 2, 2),
-            num_res_units=2,
-            up_kernel_size=3,
-            act=('LeakyReLU', {'inplace': True}),
-        )
-        
-        # Tête de segmentation
-        self.seg_head = nn.Sequential(
-            nn.Conv3d(32, 64, kernel_size=3, padding=1),
-            nn.BatchNorm3d(64),
-            nn.LeakyReLU(inplace=True),
-            nn.Conv3d(64, num_seg_classes, kernel_size=1)
-        )
-        
-        # Tête de classification
+        fea = ensure_tuple_rep(features, 6)
+        print(f"BasicUNet features: {fea}.")
+
+        # Encoder
+        self.conv_0 = TwoConv(spatial_dims, in_channels, fea[0], act, norm, bias, dropout)
+        self.down_1 = Down(spatial_dims, fea[0], fea[1], act, norm, bias, dropout)
+        self.down_2 = Down(spatial_dims, fea[1], fea[2], act, norm, bias, dropout)
+        self.down_3 = Down(spatial_dims, fea[2], fea[3], act, norm, bias, dropout)
+        self.down_4 = Down(spatial_dims, fea[3], fea[4], act, norm, bias, dropout)
+
+        # Decoder
+        self.upcat_4 = UpCat(spatial_dims, fea[4], fea[3], fea[3], act, norm, bias, dropout, upsample)
+        self.upcat_3 = UpCat(spatial_dims, fea[3], fea[2], fea[2], act, norm, bias, dropout, upsample)
+        self.upcat_2 = UpCat(spatial_dims, fea[2], fea[1], fea[1], act, norm, bias, dropout, upsample)
+        self.upcat_1 = UpCat(spatial_dims, fea[1], fea[0], fea[5], act, norm, bias, dropout, upsample, halves=False)
+
+        self.final_conv = Conv["conv", spatial_dims](fea[5], out_channels, kernel_size=1)
+
+        # Classification head → à partir du bottleneck `x4`
         self.cls_head = nn.Sequential(
-            nn.AdaptiveAvgPool3d((4, 4, 4)),  # Global pooling adaptatif
+            nn.AdaptiveAvgPool3d((4, 4, 4)),
             nn.Flatten(),
-            nn.Linear(32 * 4 * 4 * 4, 512),
+            nn.Linear(fea[4] * 4 * 4 * 4, 512),
             nn.BatchNorm1d(512),
             nn.LeakyReLU(inplace=True),
             nn.Dropout(0.5),
@@ -75,135 +100,241 @@ class MultiTaskHemorrhageNet(nn.Module):
             nn.Dropout(0.3),
             nn.Linear(256, num_cls_classes)
         )
-        
-    def forward(self, x):
-        # Encodage partagé
-        shared_features = self.shared_encoder(x)
-        
-        # Segmentation
-        seg_logits = self.seg_head(shared_features)
-        
+
+    def forward(self, x: torch.Tensor):
+        # Encoder
+        x0 = self.conv_0(x)
+        x1 = self.down_1(x0)
+        x2 = self.down_2(x1)
+        x3 = self.down_3(x2)
+        x4 = self.down_4(x3)
+
+        # Decoder (segmentation)
+        u4 = self.upcat_4(x4, x3)
+        u3 = self.upcat_3(u4, x2)
+        u2 = self.upcat_2(u3, x1)
+        u1 = self.upcat_1(u2, x0)
+        seg_logits = self.final_conv(u1)
+
         # Classification
-        cls_logits = self.cls_head(shared_features)
-        
+        cls_logits = self.cls_head(x4)  # x4 est le bottleneck
+
         return seg_logits, cls_logits
-
-# ======================
-# DATA TRANSFORMS
-# ======================
-def get_multitask_transforms():
-    """Transforms pour les données multi-tâche"""
-    window_preset = {"window_center": 40, "window_width": 80}
     
-    train_transforms = T.Compose([
-        # Loading transforms
-        T.LoadImaged(keys=["image", "seg"]),
-        T.EnsureChannelFirstd(keys=["image", "seg"]),
-        T.CropForegroundd(keys=['image', 'seg'], source_key='image'),
-        T.Orientationd(keys=["image", "seg"], axcodes='RAS'),
-        T.Spacingd(keys=["image", "seg"], pixdim=(1., 1., 1.), mode=['bilinear', 'nearest']),
-        T.SpatialPadd(keys=["image", "seg"], spatial_size=(96, 96, 96)),
-        
-        # Intensity normalization pour segmentation ET classification
-        T.ScaleIntensityRanged(
-            keys=["image"], 
-            a_min=window_preset["window_center"] - window_preset["window_width"] // 2,
-            a_max=window_preset["window_center"] + window_preset["window_width"] // 2,
-            b_min=0.0, 
-            b_max=1.0, 
-            clip=True
-        ),
-        
-        # Cropping pour segmentation
-        T.RandCropByPosNegLabeld(
-            keys=['image', 'seg'],
-            image_key='image',
-            label_key='seg',
-            pos=5.0,
-            neg=1.0,
-            spatial_size=(96, 96, 64),
-            num_samples=2
-        ),
-        
-        # Augmentations
-        T.RandScaleIntensityd(keys=['image'], factors=0.02, prob=0.5),
-        T.RandShiftIntensityd(keys=['image'], offsets=0.05, prob=0.5),
-        T.RandRotate90d(keys=['image', 'seg'], prob=0.5, max_k=2, spatial_axes=(0, 1)),
-        T.RandFlipd(keys=['image', 'seg'], prob=0.5, spatial_axis=[0, 1]),
 
 
-       # T.ToTensord(keys=["image", "seg", "label"]) 
-    ])
-    
-    
-    val_transforms = T.Compose([
-        T.LoadImaged(keys=["image", "seg"]),
-        T.EnsureChannelFirstd(keys=["image", "seg"]),
-        T.CropForegroundd(keys=['image', 'seg'], source_key='image'),
-        T.Orientationd(keys=["image", "seg"], axcodes='RAS'),
-        T.Spacingd(keys=["image", "seg"], pixdim=(1., 1., 1.), mode=['bilinear', 'nearest']),
-        T.SpatialPadd(keys=["image", "seg"], spatial_size=(96, 96, 96)),
-        T.ScaleIntensityRanged(
-            keys=["image"],
-            a_min=window_preset["window_center"] - window_preset["window_width"] // 2,
-            a_max=window_preset["window_center"] + window_preset["window_width"] // 2,
-            b_min=0.0,
-            b_max=1.0,
-            clip=True
-        ),
-        #T.ToTensord(keys=["image", "seg", "label"]) 
-    ])
-    
-    return train_transforms, val_transforms
+
 
 # ======================
 # DATA PREPARATION
 # ======================
-def prepare_multitask_data(seg_dir: str, cls_data_dir: str, split: str = "train"):
-    """Prépare les données pour l'entraînement multi-tâche"""
+def get_segmentation_data(split="train"):
+    img_dir = Path(SEG_DIR) / split / "img"
+    seg_dir = Path(SEG_DIR) / split / "seg"
     
-    # Données de segmentation
-    seg_img_dir = os.path.join(seg_dir, split, "img")
-    seg_label_dir = os.path.join(seg_dir, split, "seg")
+    images = sorted(img_dir.glob("*.nii.gz"))
+    labels = sorted(seg_dir.glob("*.nii.gz"))
     
-    seg_images = sorted([os.path.join(seg_img_dir, f) for f in os.listdir(seg_img_dir) if f.endswith('.nii.gz')])
-    seg_labels = sorted([os.path.join(seg_label_dir, f) for f in os.listdir(seg_label_dir) if f.endswith('.nii.gz')])
-    
-    # Données de classification
-    cls_csv_path = os.path.join(cls_data_dir, "splits", f"{split}_split.csv")
-    cls_df = pd.read_csv(cls_csv_path)
-    
-    # Création du mapping pour les labels de classification
-    cls_labels_dict = {}
+    assert len(images) == len(labels), "Mismatch between image and label counts"
+
+    data = []
+    for img, lbl in zip(images, labels):
+        data.append({
+            "image": str(img),
+            "label": str(lbl),
+            "task": "segmentation"
+        })
+        
+    return data
+
+
+def get_classification_data(split="train"):
+    csv_path = Path(CLASSIFICATION_DATA_DIR) / "splits" / f"{split}_split.csv"
+    df = pd.read_csv(csv_path)
+    nii_dir = Path(CLASSIFICATION_DATA_DIR)
     label_cols = ['any', 'epidural', 'intraparenchymal', 'intraventricular', 'subarachnoid', 'subdural']
     
-    for _, row in cls_df.iterrows():
-        patient_id = row['patientID_studyID']
-        cls_labels_dict[patient_id] = np.array([row[col] for col in label_cols], dtype=np.float32)
-    
-    # Combinaison des données
-    multitask_data = []
-    for img_path, seg_path in zip(seg_images, seg_labels):
-        # Extraction de l'ID patient depuis le nom de fichier
-        img_name = os.path.basename(img_path)
-        patient_id = img_name.replace('.nii.gz', '')
+    data = []
+    for _, row in df.iterrows():
+        image_path = str(nii_dir / f"{row['patientID_studyID']}.nii.gz"),
+        label = np.array([row[col] for col in label_cols], dtype=np.float32)
         
-        # Ajout des labels de classification si disponibles
-        if patient_id in cls_labels_dict:
-            multitask_data.append({
-                "image": img_path,
-                "seg": seg_path,
-                "cls_labels": cls_labels_dict[patient_id]
-            })
+        data.append({
+            "image": image_path,
+            "label": label,
+            "task": "classification"
+        })
+    return data
+
+
+def get_multitask_dataset(split="train"):
+    seg_data = get_segmentation_data(split)
+    cls_data = get_classification_data(split)
+    return seg_data + cls_data
+
+
+
+# ======================
+# DATA TRANSFORMS
+# ======================
+# Idée est de faire deux pipelines de transformation, une pour la segmentation et une pour la classification
+
+
+
+class TaskBasedTransform(T.MapTransform):
+    """
+    Applique un pipeline différent selon la tâche : "segmentation" ou "classification".
+    """
+    def __init__(self, keys):
+        super().__init__(keys)
+        self.window_preset = {"window_center": 40, "window_width": 80}
+
+        self.seg_pipeline = T.Compose([
+            T.LoadImaged(keys=["image", "label"], image_only=True),
+            T.EnsureChannelFirstd(keys=["image", "label"]),
+            T.CropForegroundd(keys=["image", "label"], source_key='image'),
+            T.Orientationd(keys=["image", "label"], axcodes='RAS'),
+            T.Spacingd(keys=["image", "label"], pixdim=(1.0, 1.0, 1.0), mode=["bilinear", "nearest"]),
+            T.SpatialPadd(keys=["image", "label"], spatial_size=(96, 96, 96)),
+            T.ScaleIntensityRanged(
+                keys=["image"],
+                a_min=self.window_preset["window_center"] - self.window_preset["window_width"] // 2,
+                a_max=self.window_preset["window_center"] + self.window_preset["window_width"] // 2,
+                b_min=0.0, b_max=1.0, clip=True
+            ),
+            T.RandCropByPosNegLabeld(
+                keys=['image', 'label'],
+                image_key='image',
+                label_key='label',
+                pos=5.0,
+                neg=1.0,
+                spatial_size=(96, 96, 64),
+                num_samples=2
+            ),
+            T.RandFlipd(keys=["image", "label"], spatial_axis=[0, 1], prob=0.5),
+            T.RandRotate90d(keys=["image", "label"], spatial_axes=(0, 1), prob=0.5),
+            T.RandScaleIntensityd(keys=["image"], factors=0.02, prob=0.5),
+            T.RandShiftIntensityd(keys=["image"], offsets=0.05, prob=0.5)
+        ])
+
+        self.cls_pipeline = T.Compose([
+            T.LoadImaged(keys=["image"], image_only=True),
+            T.EnsureChannelFirstd(keys=["image"]),
+            T.Orientationd(keys=["image"], axcodes='RAS'),
+            T.Spacingd(keys=["image"], pixdim=(1.0, 1.0, 1.0), mode="bilinear"),
+            T.ResizeWithPadOrCropd(keys=["image"], spatial_size=(96,96,96)), #bof ( trop petit) pour classification mais on test
+            T.ScaleIntensityRanged(
+                keys=["image"],
+                a_min=self.window_preset["window_center"] - self.window_preset["window_width"] // 2,
+                a_max=self.window_preset["window_center"] + self.window_preset["window_width"] // 2,
+                b_min=0.0, b_max=1.0, clip=True
+            ),
+            T.RandFlipd(keys=["image"], spatial_axis=[0, 1, 2], prob=0.5),
+            T.RandRotate90d(keys=["image"], spatial_axes=(0, 1), prob=0.5),
+            T.RandScaleIntensityd(keys=["image"], factors=0.1, prob=0.5),
+            T.RandShiftIntensityd(keys=["image"], offsets=0.1, prob=0.5),
+            T.ToTensord(keys=["image", "label"])
+        ])
+        
+    def __call__(self, data):
+        task = data["task"]
+        if task == "segmentation":
+            return self.seg_pipeline(data)
+        elif task == "classification":
+            return self.cls_pipeline(data)
         else:
-            # Si pas de labels de classification, utiliser des zéros
-            multitask_data.append({
-                "image": img_path,
-                "seg": seg_path,
-                "cls_labels": np.zeros(NUM_CLASSES, dtype=np.float32)
-            })
+            raise ValueError(f"Tâche inconnue : {task}")
+        
+def get_multitask_transforms():
+    return TaskBasedTransform(keys=["image", "label"])
+   
+       
+        
+class TaskBasedValTransform(T.MapTransform):
+    """
+    Transformations de validation — une pipeline par tâche, sans augmentation aléatoire.
+    """
+    def __init__(self, keys):
+        super().__init__(keys)
+        self.window_preset = {"window_center": 40, "window_width": 80}
+
+        self.seg_pipeline = T.Compose([
+            T.LoadImaged(keys=["image", "label"], image_only=True),
+            T.EnsureChannelFirstd(keys=["image", "label"]),
+            T.CropForegroundd(keys=["image", "label"], source_key='image'),
+            T.Orientationd(keys=["image", "label"], axcodes='RAS'),
+            T.Spacingd(keys=["image", "label"], pixdim=(1.0, 1.0, 1.0), mode=["bilinear", "nearest"]),
+            T.SpatialPadd(keys=["image", "label"], spatial_size=(96, 96, 96)),
+            T.ScaleIntensityRanged(
+                keys=["image"],
+                a_min=self.window_preset["window_center"] - self.window_preset["window_width"] // 2,
+                a_max=self.window_preset["window_center"] + self.window_preset["window_width"] // 2,
+                b_min=0.0, b_max=1.0, clip=True
+            )
+        ])
+
+        self.cls_pipeline = T.Compose([
+            T.LoadImaged(keys=["image"], image_only=True),
+            T.EnsureChannelFirstd(keys=["image"]),
+            T.Orientationd(keys=["image"], axcodes='RAS'),
+            T.Spacingd(keys=["image"], pixdim=(1.0, 1.0, 1.0), mode="bilinear"),
+            T.ResizeWithPadOrCropd(keys=["image"], spatial_size=(96, 96, 96)),
+            T.ScaleIntensityRanged(
+                keys=["image"],
+                a_min=self.window_preset["window_center"] - self.window_preset["window_width"] // 2,
+                a_max=self.window_preset["window_center"] + self.window_preset["window_width"] // 2,
+                b_min=0.0, b_max=1.0, clip=True
+            ),
+            T.ToTensord(keys=["image", "label"])
+        ])
+
+    def __call__(self, data):
+        task = data["task"]
+        if task == "segmentation":
+            return self.seg_pipeline(data)
+        elif task == "classification":
+            return self.cls_pipeline(data)
+        else:
+            raise ValueError(f"Tâche inconnue : {task}")
+        
+def get_multitask_val_transforms():
+    return TaskBasedValTransform(keys=["image", "label"])
+
+# ======================
+# DATA COLLATE FUNCTION pour le multi-tâche et bien loader les batchs
+# ======================
+from monai.data.utils import list_data_collate
+
+from monai.data.utils import list_data_collate
+from collections.abc import Iterable
+
+def flatten(batch):
+    for item in batch:
+        if isinstance(item, list):
+            yield from flatten(item)
+        else:
+            yield item
+
+def multitask_collate_fn(batch):
+    flat_batch = list(flatten(batch))  
+
+    classification_batch = []
+    segmentation_batch = []
+
+    for item in flat_batch:
+        if item["task"] == "classification":
+            classification_batch.append(item)
+        elif item["task"] == "segmentation":
+            segmentation_batch.append(item)
+        else:
+            raise ValueError(f"Tâche inconnue : {item['task']}")
+
+    result = {
+        "classification": list_data_collate(classification_batch) if classification_batch else None,
+        "segmentation": list_data_collate(segmentation_batch) if segmentation_batch else None
+    }
     
-    return multitask_data
+    return result
 
 # ======================
 # LIGHTNING MODULE
@@ -218,7 +349,12 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
         self.cls_weight = cls_weight
         
         # Modèle multi-tâche
-        self.model = MultiTaskHemorrhageNet(num_seg_classes=6, num_cls_classes=6)
+        self.model = BasicUNetWithClassification(
+            spatial_dims=3,
+            in_channels=1,
+            out_channels=6,  # pour segmentation
+            num_cls_classes=NUM_CLASSES  # pour classification
+        )
         
         # Fonctions de perte
         self.seg_loss_fn = DiceCELoss(include_background=False, to_onehot_y=True, softmax=True)
@@ -242,138 +378,148 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
         return self.model(x)
         
     def training_step(self, batch, batch_idx):
-        x = batch["image"]
-        seg_target = batch["seg"]
-        cls_target = batch["cls_labels"]
-        
+        total_loss = 0.0
+
+        if batch["classification"] is not None:
+            x_cls = batch["classification"]["image"]
+            y_cls = batch["classification"]["label"]
+
         # Forward pass
-        seg_logits, cls_logits = self.forward(x)
-        
-        # Calcul des pertes
-        seg_loss = self.seg_loss_fn(seg_logits, seg_target)
-        cls_loss = self.cls_loss_fn(cls_logits, cls_target)
-        
-        # Perte totale pondérée
-        total_loss = self.seg_weight * seg_loss + self.cls_weight * cls_loss
-        
-        # Logging
+            _ ,cls_logits = self.model(x_cls)
+
+        # Loss classification
+            loss_cls = self.cls_loss_fn(cls_logits, y_cls)
+            total_loss += loss_cls
+
+        # Log etc.
+
+        if batch["segmentation"] is not None:
+            x_seg = batch["segmentation"]["image"]
+            y_seg = batch["segmentation"]["label"]
+
+        # Forward pass
+            seg_logits,_ = self.model(x_seg)
+
+        # Loss segmentation
+            loss_seg = self.seg_loss_fn(seg_logits, y_seg)
+            total_loss += loss_seg
+
+        # Log à compléter
         self.log("train_loss", total_loss, on_step=True, on_epoch=True, prog_bar=True)
-        self.log("train_seg_loss", seg_loss, on_step=True, on_epoch=True)
-        self.log("train_cls_loss", cls_loss, on_step=True, on_epoch=True)
-        
-        # Learning rate
-        if self.trainer.lr_scheduler_configs:
-            lr = self.trainer.lr_scheduler_configs[0].scheduler.optimizer.param_groups[0]["lr"]
-            self.log("lr", lr, on_step=True, prog_bar=True)
-        
+        # self.log("train_seg_loss", loss_seg, on_step=True, on_epoch=True)
+        # self.log("train_cls_loss", loss_cls, on_step=True, on_epoch=True)
+
         return total_loss
         
-    def validation_step(self, batch, batch_idx):
-        x = batch["image"]
-        seg_target = batch["seg"]
-        cls_target = batch["cls_labels"]
+    def validation_step(self, batch,batch_idx):
         
-        # Forward pass avec sliding window pour la segmentation
-        seg_pred = sliding_window_inference(
-            x, 
-            roi_size=(96, 96, 96),
-            sw_batch_size=2,
-            predictor=lambda x: self.forward(x)[0]  # Seulement la sortie de segmentation
-        )
+        total_loss = 0.0
         
-        # Forward pass normal pour la classification
-        _, cls_logits = self.forward(x)
+        if batch["classification"] is  not None : 
+                x_cls = batch["classification"]["image"]
+                y_cls = batch["classification"]["label"]
+                
+                _, y_hat_cls = self.model(x_cls)
+                loss_cls = self.cls_loss_fn(y_hat_cls, y_cls)
+                y_cls_pred = torch.sigmoid(y_hat_cls).as_tensor()
+                self.cls_auc.update(y_cls_pred, y_cls.int())
+                self.cls_mean_auc.update(y_cls_pred, y_cls.int())
+                self.cls_mean_precision.update(y_cls_pred, y_cls.int())
+                self.cls_mean_recall.update(y_cls_pred, y_cls.int())
+                
+                total_loss += loss_cls
+                
+        if batch["segmentation"] is not None:
+                x_seg = batch["segmentation"]["image"]
+                y_seg = batch["segmentation"]["label"]
+                
+                y_hat_seg,_ = sliding_window_inference(
+                    x_seg,
+                    roi_size=(96, 96, 96),
+                    sw_batch_size=2,
+                    predictor=self.model
+                )
+                
+                loss_seg = self.seg_loss_fn(y_hat_seg, y_seg)
+                scores, _ = self.dice_metric(y_hat_seg, y_seg)
+
+                y_labels = y_seg.unique().long().tolist()[1:]
+                scores = {label: scores[0][label - 1].item() for label in y_labels}
+
+                metrics = {f'dice_c{label}': score for label, score in scores.items()}
+                
+
+                self.log_dict(metrics, on_epoch=True, prog_bar=True)
+
+                total_loss += loss_seg
+                # Log total loss
+                
+        self.log("val_loss", total_loss, on_step=False, on_epoch=True, prog_bar=True)
         
-        # Calcul des pertes
-        seg_loss = self.seg_loss_fn(seg_pred, seg_target)
-        cls_loss = self.cls_loss_fn(cls_logits, cls_target)
-        total_loss = self.seg_weight * seg_loss + self.cls_weight * cls_loss
-        
-        # Métriques de segmentation
-        seg_scores, _ = self.seg_dice_metric(seg_pred, seg_target)
-        seg_labels = seg_target.unique().long().tolist()[1:]
-        seg_metrics = {label: seg_scores[0][label - 1].item() for label in seg_labels}
-        
-        # Métriques de classification
-        cls_pred = torch.sigmoid(cls_logits)
-        self.cls_auc.update(cls_pred, cls_target.int())
-        self.cls_mean_auc.update(cls_pred, cls_target.int())
-        self.cls_mean_precision.update(cls_pred, cls_target.int())
-        self.cls_mean_recall.update(cls_pred, cls_target.int())
-        
-        # Logging
-        self.log("val_loss", total_loss, on_epoch=True, prog_bar=True)
-        self.log("val_seg_loss", seg_loss, on_epoch=True)
-        self.log("val_cls_loss", cls_loss, on_epoch=True)
-        
-        # Log segmentation metrics
-        for label, score in seg_metrics.items():
-            self.log(f'val_dice_c{label}', score, on_epoch=True)
-            
-        return total_loss
-        
-    def on_validation_epoch_end(self):
-        # Métriques de classification
+                
+    def validation_epoch_end(self, outputs):    
+    # === CLASSIFICATION ===
         class_auc = self.cls_auc.compute()
         mean_auc = self.cls_mean_auc.compute()
         mean_precision = self.cls_mean_precision.compute()
         mean_recall = self.cls_mean_recall.compute()
-        
-        # Log des métriques moyennes
+
         self.log_dict({
-            'val_cls_mean_auc': mean_auc,
-            'val_cls_mean_precision': mean_precision,
-            'val_cls_mean_recall': mean_recall
-        }, on_epoch=True)
-        
-        # Log des métriques par classe
-        for i, class_name in enumerate(CLASS_NAMES):
-            self.log(f'val_cls_auc_{class_name}', class_auc[i].item(), on_epoch=True)
-        
-        # Reset des métriques
+            'val_mean_auc': mean_auc,
+            'val_mean_precision': mean_precision,
+            'val_mean_recall': mean_recall
+        }, on_epoch=True, prog_bar=True)
+
+    # Log AUC pour chaque classe
+        for i in range(NUM_CLASSES):
+            self.log(f'val_auc_class_{i}', class_auc[i].item(), on_epoch=True)
+
+    # Reset classification metrics
         self.cls_auc.reset()
         self.cls_mean_auc.reset()
         self.cls_mean_precision.reset()
         self.cls_mean_recall.reset()
+
+    
         
     def configure_optimizers(self):
-        # Optimiseur adaptatif selon les tâches
-        optimizer = Adam(self.parameters(), lr=1e-3, weight_decay=1e-5)
-        
-        scheduler = ReduceLROnPlateau(
-            optimizer,
-            mode='min',
-            factor=0.5,
-            patience=5,
-            verbose=True
-        )
-        
+        optimizer = torch.optim.Adam(self.parameters(), lr=1e-3, weight_decay=1e-5)
+
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode='min',
+        factor=0.5,
+        patience=5,
+        verbose=True
+    )
+
         return {
-            "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": scheduler,
-                "monitor": "val_loss",
-                "interval": "epoch",
-                "frequency": 1
-            }
+        "optimizer": optimizer,
+        "lr_scheduler": {
+            "scheduler": scheduler,
+            "monitor": "val_loss",
+            "interval": "epoch",
+            "frequency": 1
         }
+    }
 
 # ======================
 # TRAINING SETUP
 # ======================
 def main():
     num_epochs = 100
-    batch_size = 2
+    batch_size = 8
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     
     # Préparation des données
-    train_data = prepare_multitask_data(DATASET_DIR, CLASSIFICATION_DATA_DIR, "train")
-    val_data = prepare_multitask_data(DATASET_DIR, CLASSIFICATION_DATA_DIR, "val")
+    train_data = get_multitask_dataset("train")
+    val_data = get_multitask_dataset("val")
     
     print(f"Training samples: {len(train_data)}")
     print(f"Validation samples: {len(val_data)}")
     
     # Transforms
-    train_transforms, val_transforms = get_multitask_transforms()
+    train_transforms, val_transforms = get_multitask_transforms(), get_multitask_val_transforms()
     
     # Datasets
     train_dataset = PersistentDataset(
@@ -394,7 +540,8 @@ def main():
         batch_size=batch_size, 
         shuffle=True, 
         num_workers=8,
-        persistent_workers=True
+        persistent_workers=True,
+        collate_fn=multitask_collate_fn
     )
     
     val_loader = DataLoader(
@@ -402,31 +549,27 @@ def main():
         batch_size=1, 
         shuffle=False, 
         num_workers=8,
-        persistent_workers=True
+        persistent_workers=True,
+        collate_fn=multitask_collate_fn
     )
     
     # Modèle
-    model = MultiTaskHemorrhageModule(
-        num_steps=len(train_loader) * num_epochs,
-        seg_weight=1.0,  # Poids pour la segmentation
-        cls_weight=0.5   # Poids pour la classification
-    )
+    model = MultiTaskHemorrhageModule(num_steps=len(train_loader) * num_epochs)
     
     print(f"Total number of steps: {len(train_loader) * num_epochs}")
     
     # Trainer
     trainer = pl.Trainer(
         max_epochs=num_epochs,
-        check_val_every_n_epoch=5,
         accelerator="auto",
-        devices=[1],
+        devices=[0],
         default_root_dir=SAVE_DIR,
         logger=TensorBoardLogger(
             save_dir=SAVE_DIR,
             name="multitask_logs"
         ),
         gradient_clip_val=1.0,  # Gradient clipping pour la stabilité
-        log_every_n_steps=50
+        log_every_n_steps=50,
         accumulate_grad_batches=4 # Ajout car pour gérer les petites tailles de batch ( dues à limitation mémoire)
     )
     
