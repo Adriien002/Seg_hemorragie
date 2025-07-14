@@ -85,15 +85,25 @@ transforms = T.Compose([
         keys=['image', 'seg'],
         prob=0.5,
         spatial_axis=[0, 1]
+    ),
+    
+    T.RandAffined(
+    keys=['image', 'seg'],
+    prob=0.3,
+    rotate_range=(0.1, 0.1, 0.1),  # Rotation légère sur tous les axes
+    scale_range=(0.1, 0.1, 0.1),   # Zoom léger
+    mode=['bilinear', 'nearest'],
+    padding_mode='border'
+    ),
+    
+    
+    T.Rand3DElasticd(
+    keys=['image', 'seg'],
+    prob=0.3,
+    sigma_range=(1, 2),
+    magnitude_range=(0.1, 0.3),
+    mode=['bilinear', 'nearest']
     )
-    # T.RandAffined(
-    # keys=['image', 'seg'],
-    # prob=0.3,
-    # rotate_range=(0, 0, 0.1),  # Petite rotation seulement en axial (Z)
-    # scale_range=(0.1, 0.1, 0),  # Léger zoom dans le plan axial
-    # mode=['bilinear', 'nearest'],
-    # padding_mode='border'
-    # ),
 
     # T.RandAdjustContrastd(
     # keys=['image'],
@@ -159,7 +169,7 @@ class HemorrhageModel(pl.LightningModule):
         x, y = batch["image"], batch["seg"]
 
         y_hat = sliding_window_inference(x,
-                                         roi_size=(96, 96, 96),
+                                         roi_size=(96, 96, 64),
                                          sw_batch_size=2,
                                          predictor=self.model)
 
@@ -173,6 +183,29 @@ class HemorrhageModel(pl.LightningModule):
 
         metrics = {f'dice_c{label}': score for label, score in scores.items()}
         metrics['val_loss'] = loss
+
+        self.log_dict(metrics, on_epoch=True, prog_bar=True)
+
+        return loss
+    
+    def test_step(self, batch, batch_idx):
+        x, y = batch["image"], batch["seg"]
+
+        y_hat = sliding_window_inference(x,
+                                         roi_size=(96, 96, 96),
+                                         sw_batch_size=2,
+                                         predictor=self.model)
+
+        # Loss
+        loss = self.loss_fn(y_hat, y)
+
+        scores, _ = self.dice_metric(y_hat, y)
+
+        y_labels = y.unique().long().tolist()[1:]
+        scores = {label: scores[0][label - 1].item() for label in y_labels}
+
+        metrics = {f'dice_c{label}': score for label, score in scores.items()}
+        metrics['test_loss'] = loss
 
         self.log_dict(metrics, on_epoch=True, prog_bar=True)
 
@@ -204,6 +237,20 @@ def main():
     # Load data (same as original)
     train_files = get_data_files(f"{DATASET_DIR}/train/img", f"{DATASET_DIR}/train/seg")
     val_files = get_data_files(f"{DATASET_DIR}/val/img", f"{DATASET_DIR}/val/seg")
+    test_files = get_data_files(f"{DATASET_DIR}/test/img", f"{DATASET_DIR}/test/seg")
+    
+    
+    test_dataset = PersistentDataset(
+        test_files,
+        transform=val_transforms,
+        cache_dir=os.path.join(SAVE_DIR, "cache_test")  
+    )
+    
+    test_loader = DataLoader(
+        test_dataset, 
+        batch_size=1, 
+        shuffle=False,  
+        num_workers=4  )
 
     train_dataset = PersistentDataset(
         train_files,
@@ -239,6 +286,10 @@ def main():
 
     # Start training
     trainer.fit(model, train_loader, val_loader)
+    
+    #Test
+    print("Starting test phase...")
+    trainer.test(model, dataloaders=test_loader)
 
 
 if __name__ == "__main__":
