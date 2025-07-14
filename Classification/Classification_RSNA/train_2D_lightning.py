@@ -16,6 +16,7 @@ from pathlib import Path
 import monai.transforms as T
 from monai.data import PersistentDataset, DataLoader
 from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 
 import warnings
 warnings.filterwarnings("ignore", "You are using `torch.load` with `weights_only=False`*.")
@@ -29,13 +30,19 @@ CLASS_NAMES = ['any', 'epidural', 'intraparenchymal', 'intraventricular', 'subar
 DEVICE = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
 SAVE_DIR = "/home/tibia/Projet_Hemorragie/MBH_2D_Classif"
 
+
+
+
 class ClassifierModule(pl.LightningModule):
-    def __init__(self, config = None):
+    def __init__(self, config=None, pos_weights=None):
         super().__init__()
         self.save_hyperparameters()
 
         self.num_classes = NUM_CLASSES
         self.class_names = CLASS_NAMES
+        
+        self.pos_weights = pos_weights.to(DEVICE) if pos_weights is not None else torch.ones(NUM_CLASSES, device=DEVICE)
+        self.loss_fn = torch.nn.BCEWithLogitsLoss(pos_weight=self.pos_weights)
 
         # Dynamically get the model from torchvision.models
         self.model = self._get_model()
@@ -183,10 +190,10 @@ def prepare_data(csv_path, dicom_dir, label_cols):
     
         return data_list
 
+
+
 def create_transforms():
-    """Create training transforms"""
     window_preset = {"window_center": 40, "window_width": 80}
-    
     train_transforms = T.Compose([
         T.LoadImaged(keys=["image"], image_only=True),
         T.ScaleIntensityRanged(
@@ -198,21 +205,65 @@ def create_transforms():
             clip=True
         ),
         T.EnsureChannelFirstd(keys=["image"]),
-        T.Resized(keys=["image"], spatial_size=(224, 224)),
-        T.ToTensord(keys=["image", "label"])  
+        T.Resized(keys=["image"], spatial_size=(256, 256)),
+        T.RandRotate90d(keys=["image"], prob=0.5, max_k=3),
+        T.RandFlipd(keys=["image"], prob=0.5, spatial_axis=0),  # Horizontal flip
+        T.RandFlipd(keys=["image"], prob=0.5, spatial_axis=1),  # Vertical flip
+        T.RandAffined(
+            keys=["image"],
+            prob=0.3,
+            rotate_range=(0.1, 0.1),  # Slight rotation
+            scale_range=(0.1, 0.1),   # Slight zoom
+            mode='bilinear'
+        ),
+        T.RandGaussianNoised(keys=["image"], prob=0.3, mean=0.0, std=0.1),
+        T.RandAdjustContrastd(keys=["image"], prob=0.3, gamma=(0.7, 1.3)),
+        T.ToTensord(keys=["image", "label"])
     ])
     
-    return train_transforms
+    val_transforms = T.Compose([
+        T.LoadImaged(keys=["image"], image_only=True),
+        T.ScaleIntensityRanged(
+            keys=["image"],
+            a_min=window_preset["window_center"] - window_preset["window_width"] // 2,
+            a_max=window_preset["window_center"] + window_preset["window_width"] // 2,
+            b_min=0.0,
+            b_max=1.0,
+            clip=True
+        ),
+        T.EnsureChannelFirstd(keys=["image"]),
+        T.Resized(keys=["image"], spatial_size=(256, 256)),
+        T.ToTensord(keys=["image", "label"])
+    ])
+    
+    return train_transforms, val_transforms
 
+def calculate_pos_weights(csv_path, label_cols):
+    """Calculate pos_weight for BCEWithLogitsLoss based on class frequency."""
+    df = pd.read_csv(csv_path)
+    pos_weights = []
+    for col in label_cols:
+        pos_count = df[col].sum()
+        neg_count = len(df) - pos_count
+        if pos_count > 0:
+            pos_weight = neg_count / pos_count
+        else:
+            pos_weight = 1.0  # Default weight if no positive samples
+        pos_weights.append(pos_weight)
+    return torch.tensor(pos_weights, dtype=torch.float)
 
 def main():
     csv_train_path = Path("/home/tibia/Projet_Hemorragie/Seg_hemorragie/Classification/Classification_RSNA/data/csv/train_fold0.csv")
     csv_val_path = Path("/home/tibia/Projet_Hemorragie/Seg_hemorragie/Classification/Classification_RSNA/data/csv/val_fold0.csv")
     dicom_dir = Path("/home/tibia/Projet_Hemorragie/Seg_hemorragie/Classification/Classification_RSNA/data/rsna-intracranial-hemorrhage-detection/stage_2_train")
-    train_cache_dir = Path("./persistent_cache2/fold0_train")  
+    train_cache_dir = Path("./persistent_cache2/fold0_train") 
     val_cache_dir = Path("./persistent_cache2/fold0_val")
     
     label_cols = ['any', 'epidural', 'intraparenchymal', 'intraventricular', 'subarachnoid', 'subdural']
+    
+    # === Pos Weights ===
+    pos_weights = calculate_pos_weights(csv_train_path, label_cols)
+    print(f"Pos weights: {dict(zip(label_cols, pos_weights.tolist()))}")
     
     # === Prepare Data ===
     print("Preparing data...")
@@ -221,7 +272,7 @@ def main():
 
     
     # === Create Transforms ===
-    train_transforms = create_transforms()
+    train_transforms,val_transforms= create_transforms()
     
     # === Create Dataset ===
     train_dataset = PersistentDataset(
@@ -232,7 +283,7 @@ def main():
 
     val_dataset = PersistentDataset(
     data=data_val_list,
-    transform=train_transforms,
+    transform=val_transforms,
     cache_dir=str(val_cache_dir),
     )
     # train_dataset = Dataset(data=data_train_list, transform=train_transforms)
@@ -268,7 +319,7 @@ def main():
 
 
 
-    model =ClassifierModule()
+    model = ClassifierModule(pos_weights=pos_weights)
     
     trainer = pl.Trainer(
         max_epochs=EPOCHS,
@@ -278,7 +329,11 @@ def main():
         logger=TensorBoardLogger(
             save_dir=SAVE_DIR,
             name="lightning_logs"  # Dossier où sont stockés les logs
-        )
+        ),
+        callbacks=[
+            EarlyStopping(monitor="val_loss", patience=10, mode="min"),
+            ModelCheckpoint(monitor="val_loss", mode="min", save_top_k=1, filename="best-checkpoint-{epoch:02d}-{val_loss:.2f}")
+        ]
     )
 
     trainer.fit(model, train_loader, val_loader)
