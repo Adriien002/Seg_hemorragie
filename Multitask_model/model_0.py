@@ -156,7 +156,7 @@ def get_classification_data(split="train"):
     
     data = []
     for _, row in df.iterrows():
-        image_path = str(nii_dir / f"{row['patientID_studyID']}.nii.gz"),
+        image_path = str(nii_dir / f"{row['patientID_studyID']}.nii.gz")
         label = np.array([row[col] for col in label_cols], dtype=np.float32)
         
         data.append({
@@ -303,7 +303,7 @@ def get_multitask_val_transforms():
 # ======================
 # DATA COLLATE FUNCTION pour le multi-tâche et bien loader les batchs
 # ======================
-from monai.data.utils import list_data_collate
+
 
 from monai.data.utils import list_data_collate
 from collections.abc import Iterable
@@ -336,11 +336,35 @@ def multitask_collate_fn(batch):
     
     return result
 
+# Gestion equilibrage des classes
+# TODO : ajouter un sur-échantillonnage pour la segmentation si nécessaire
+# def multitask_collate_fn(batch):
+#     flat_batch = list(flatten(batch))
+    
+#     classification_batch = [item for item in flat_batch if item["task"] == "classification"]
+#     segmentation_batch = [item for item in flat_batch if item["task"] == "segmentation"]
+    
+#     # Suréchantillonnage : répéter les échantillons de segmentation
+#     seg_repeat = max(1, len(classification_batch) // len(segmentation_batch))
+#     segmentation_batch = segmentation_batch * seg_repeat
+    
+#     # Mélanger pour éviter un biais d'ordre
+#     import random
+#     random.shuffle(segmentation_batch)
+#     random.shuffle(classification_batch)
+    
+#     result = {
+#         "classification": list_data_collate(classification_batch) if classification_batch else None,
+#         "segmentation": list_data_collate(segmentation_batch) if segmentation_batch else None
+#     }
+    
+#     return result
+
 # ======================
 # LIGHTNING MODULE
 # ======================
 class MultiTaskHemorrhageModule(pl.LightningModule):
-    def __init__(self, num_steps: int, seg_weight: float = 1.0, cls_weight: float = 1.0):
+    def __init__(self, num_steps: int, seg_weight: float = 8.0, cls_weight: float = 1.0):
         super().__init__()
         self.save_hyperparameters()
         
@@ -388,7 +412,7 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
             _ ,cls_logits = self.model(x_cls)
 
         # Loss classification
-            loss_cls = self.cls_loss_fn(cls_logits, y_cls)
+            loss_cls = self.cls_loss_fn(cls_logits, y_cls)* self.cls_weight
             total_loss += loss_cls
 
         # Log etc.
@@ -401,11 +425,19 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
             seg_logits,_ = self.model(x_seg)
 
         # Loss segmentation
-            loss_seg = self.seg_loss_fn(seg_logits, y_seg)
+            loss_seg = self.seg_loss_fn(seg_logits, y_seg)* self.seg_weight
             total_loss += loss_seg
 
         # Log à compléter
-        self.log("train_loss", total_loss, on_step=True, on_epoch=True, prog_bar=True)
+        # Batch size pour log
+        batch_size = 0
+        if batch["classification"] is not None:
+            batch_size += batch["classification"]["image"].shape[0]
+        if batch["segmentation"] is not None:
+            batch_size += batch["segmentation"]["image"].shape[0]
+
+        self.log("train_loss", total_loss, batch_size=batch_size, on_step=True, on_epoch=True, prog_bar=True)
+        
         # self.log("train_seg_loss", loss_seg, on_step=True, on_epoch=True)
         # self.log("train_cls_loss", loss_cls, on_step=True, on_epoch=True)
 
@@ -419,8 +451,8 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
                 x_cls = batch["classification"]["image"]
                 y_cls = batch["classification"]["label"]
                 
-                _, y_hat_cls = self.model(x_cls)
-                loss_cls = self.cls_loss_fn(y_hat_cls, y_cls)
+                _ , y_hat_cls = self.model(x_cls)
+                loss_cls = self.cls_loss_fn(y_hat_cls, y_cls)* self.cls_weight
                 y_cls_pred = torch.sigmoid(y_hat_cls).as_tensor()
                 self.cls_auc.update(y_cls_pred, y_cls.int())
                 self.cls_mean_auc.update(y_cls_pred, y_cls.int())
@@ -433,16 +465,16 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
                 x_seg = batch["segmentation"]["image"]
                 y_seg = batch["segmentation"]["label"]
                 
-                y_hat_seg,_ = sliding_window_inference(
+                y_hat_seg = sliding_window_inference(
                     x_seg,
                     roi_size=(96, 96, 96),
                     sw_batch_size=2,
-                    predictor=self.model
+                    predictor=lambda x: self.model(x)[0]
                 )
                 
-                loss_seg = self.seg_loss_fn(y_hat_seg, y_seg)
-                scores, _ = self.dice_metric(y_hat_seg, y_seg)
-
+                loss_seg = self.seg_loss_fn(y_hat_seg, y_seg)* self.seg_weight
+                scores, _ = self.seg_dice_metric(y_hat_seg, y_seg)
+               
                 y_labels = y_seg.unique().long().tolist()[1:]
                 scores = {label: scores[0][label - 1].item() for label in y_labels}
 
@@ -453,34 +485,38 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
 
                 total_loss += loss_seg
                 # Log total loss
-                
-        self.log("val_loss", total_loss, on_step=False, on_epoch=True, prog_bar=True)
+        batch_size = 0
+        if batch["classification"] is not None:
+                batch_size += batch["classification"]["image"].shape[0]
+        if batch["segmentation"] is not None:
+                batch_size += batch["segmentation"]["image"].shape[0]
+
+        self.log("val_loss", total_loss, batch_size=batch_size, on_step=False, on_epoch=True, prog_bar=True )    
+
         
                 
-    def validation_epoch_end(self, outputs):    
-    # === CLASSIFICATION ===
-        class_auc = self.cls_auc.compute()
-        mean_auc = self.cls_mean_auc.compute()
-        mean_precision = self.cls_mean_precision.compute()
-        mean_recall = self.cls_mean_recall.compute()
-
-        self.log_dict({
-            'val_mean_auc': mean_auc,
-            'val_mean_precision': mean_precision,
-            'val_mean_recall': mean_recall
-        }, on_epoch=True, prog_bar=True)
-
-    # Log AUC pour chaque classe
-        for i in range(NUM_CLASSES):
-            self.log(f'val_auc_class_{i}', class_auc[i].item(), on_epoch=True)
-
-    # Reset classification metrics
-        self.cls_auc.reset()
-        self.cls_mean_auc.reset()
-        self.cls_mean_precision.reset()
-        self.cls_mean_recall.reset()
-
     
+    def on_validation_epoch_end(self):
+    # === CLASSIFICATION ===
+        if len(self.cls_auc.preds) > 0:
+            class_auc = self.cls_auc.compute()
+            mean_auc = self.cls_mean_auc.compute()
+            mean_precision = self.cls_mean_precision.compute()
+            mean_recall = self.cls_mean_recall.compute()
+
+            self.log_dict({
+                'val_mean_auc': mean_auc,
+                'val_mean_precision': mean_precision,
+                'val_mean_recall': mean_recall
+            }, on_epoch=True, prog_bar=True)
+
+            for i in range(NUM_CLASSES):
+                self.log(f'val_auc_class_{i}', class_auc[i].item(), on_epoch=True)
+
+            self.cls_auc.reset()
+            self.cls_mean_auc.reset()
+            self.cls_mean_precision.reset()
+            self.cls_mean_recall.reset()
         
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-3, weight_decay=1e-5)
@@ -562,7 +598,7 @@ def main():
     trainer = pl.Trainer(
         max_epochs=num_epochs,
         accelerator="auto",
-        devices=[0],
+        devices=[1],
         default_root_dir=SAVE_DIR,
         logger=TensorBoardLogger(
             save_dir=SAVE_DIR,
