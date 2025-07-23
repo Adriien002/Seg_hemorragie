@@ -5,12 +5,13 @@ import pytorch_lightning as pl
 import torch
 from monai.data import DataLoader, PersistentDataset, Dataset
 from monai.inferers import sliding_window_inference
-from monai.losses import DiceCELoss
+from monai.losses import DiceCELoss,DiceFocalLoss
 from monai.metrics import DiceMetric, DiceHelper
 from monai.networks.nets import UNet,SwinUNETR
 import monai.transforms as T
 from pytorch_lightning.loggers import TensorBoardLogger
-from torch.optim import SGD
+from torch.optim import SGD, Adam
+from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 from transformers import get_linear_schedule_with_warmup
 
 warnings.filterwarnings("ignore", message="You are using `torch.load` with `weights_only=False`")
@@ -19,7 +20,7 @@ warnings.filterwarnings("ignore", message="You are using `torch.load` with `weig
 # 1. CONFIGURATION
 # ======================
 DATASET_DIR = '/home/tibia/Projet_Hemorragie/Seg_hemorragie/split_MONAI'
-SAVE_DIR = "/home/tibia/Projet_Hemorragie/MBH_new_log"
+SAVE_DIR = "/home/tibia/Projet_Hemorragie/MBH_aug_low"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
 # ======================
@@ -42,7 +43,7 @@ transforms = T.Compose([
        label_key='seg',
         pos=5.0,
         neg=1.0,
-        spatial_size=(96, 96, 64),
+        spatial_size=(96, 96, 96),
         num_samples=2
     ),
     # T.RandCropByLabelClassesd(
@@ -85,25 +86,15 @@ transforms = T.Compose([
         keys=['image', 'seg'],
         prob=0.5,
         spatial_axis=[0, 1]
-    ),
-    
-    T.RandAffined(
-    keys=['image', 'seg'],
-    prob=0.3,
-    rotate_range=(0.1, 0.1, 0.1),  # Rotation légère sur tous les axes
-    scale_range=(0.1, 0.1, 0.1),   # Zoom léger
-    mode=['bilinear', 'nearest'],
-    padding_mode='border'
-    ),
-    
-    
-    T.Rand3DElasticd(
-    keys=['image', 'seg'],
-    prob=0.3,
-    sigma_range=(1, 2),
-    magnitude_range=(0.1, 0.3),
-    mode=['bilinear', 'nearest']
     )
+    # T.RandAffined(
+    # keys=['image', 'seg'],
+    # prob=0.3,
+    # rotate_range=(0, 0, 0.1),  # Petite rotation seulement en axial (Z)
+    # scale_range=(0.1, 0.1, 0),  # Léger zoom dans le plan axial
+    # mode=['bilinear', 'nearest'],
+    # padding_mode='border'
+    # ),
 
     # T.RandAdjustContrastd(
     # keys=['image'],
@@ -122,6 +113,7 @@ val_transforms = T.Compose([
     T.SpatialPadd(keys=["image", "seg"], spatial_size=(96, 96, 96)),  # make sure we have at least 96 slices
     T.ScaleIntensityRanged(keys=["image"], a_min=-10, a_max=140, b_min=0.0, b_max=1.0, clip=True),  # clip images
 ])
+
 
 
 def get_data_files(img_dir, seg_dir):
@@ -145,7 +137,25 @@ class HemorrhageModel(pl.LightningModule):
             strides=(2, 2, 2, 2, 2),
             num_res_units=2,
         )
-
+        # self.model = BasicUNetWithClassification(
+        #     spatial_dims=3,
+        #     in_channels=1,
+        #     out_channels=6,  # pour segmentation
+        #     num_cls_classes=6,  # pour classification
+        #     features=(32, 32, 64, 128, 256, 32),
+        #     act=("LeakyReLU", {"negative_slope": 0.1, "inplace": True}),
+        #     norm=("instance", {"affine": True}),
+        #     bias=True,
+        #     dropout=0.0,
+        #     upsample="deconv"
+        # )
+        
+        # self.loss_fn = DiceFocalLoss(
+        #     include_background=False,
+        #     to_onehot_y=True,
+        #     softmax=True,
+        #     gamma=2.0,
+        #     )
         self.loss_fn = DiceCELoss(include_background=False, to_onehot_y=True, softmax=True) # don't need to weight the dice ce loss
         self.dice_metric = DiceHelper(include_background=False,
                                       softmax=True,
@@ -169,7 +179,7 @@ class HemorrhageModel(pl.LightningModule):
         x, y = batch["image"], batch["seg"]
 
         y_hat = sliding_window_inference(x,
-                                         roi_size=(96, 96, 64),
+                                         roi_size=(96, 96, 96),
                                          sw_batch_size=2,
                                          predictor=self.model)
 
@@ -188,43 +198,57 @@ class HemorrhageModel(pl.LightningModule):
 
         return loss
     
-    def test_step(self, batch, batch_idx):
-        x, y = batch["image"], batch["seg"]
+    # def test_step(self, batch, batch_idx):
+    #     x, y = batch["image"], batch["seg"]
 
-        y_hat = sliding_window_inference(x,
-                                         roi_size=(96, 96, 96),
-                                         sw_batch_size=2,
-                                         predictor=self.model)
+    #     y_hat = sliding_window_inference(x,
+    #                                      roi_size=(96, 96, 96),
+    #                                      sw_batch_size=2,
+    #                                      predictor=self.model)
 
-        # Loss
-        loss = self.loss_fn(y_hat, y)
+    #     # Loss
+    #     loss = self.loss_fn(y_hat, y)
 
-        scores, _ = self.dice_metric(y_hat, y)
+    #     scores, _ = self.dice_metric(y_hat, y)
 
-        y_labels = y.unique().long().tolist()[1:]
-        scores = {label: scores[0][label - 1].item() for label in y_labels}
+    #     y_labels = y.unique().long().tolist()[1:]
+    #     scores = {label: scores[0][label - 1].item() for label in y_labels}
 
-        metrics = {f'dice_c{label}': score for label, score in scores.items()}
-        metrics['test_loss'] = loss
+    #     metrics = {f'dice_c{label}': score for label, score in scores.items()}
+    #     metrics['test_loss'] = loss
 
-        self.log_dict(metrics, on_epoch=True, prog_bar=True)
+    #     self.log_dict(metrics, on_epoch=True, prog_bar=True)
 
-        return loss
+    #     return loss
 
-    def configure_optimizers(self):
+        
+    # def configure_optimizers(self):
 
-        optimizer = SGD(self.parameters(), lr=1e-3, momentum=0.99, nesterov=True, weight_decay=0.00003)
-        scheduler = get_linear_schedule_with_warmup(optimizer,
-                                                    num_warmup_steps=0,
-                                                    num_training_steps=self.num_steps)
+    #     optimizer = SGD(self.parameters(), lr=1e-3, momentum=0.99, nesterov=True, weight_decay=0.00003)
+    #     scheduler = get_linear_schedule_with_warmup(optimizer,
+    #                                                 num_warmup_steps=0,
+    #                                                 num_training_steps=self.num_steps)
+    #     return {
+    #         "optimizer": optimizer,
+    #         "lr_scheduler": {
+    #             "scheduler": scheduler,
+    #             "frequency": 1,
+    #             "interval": 'step'
+    #         }
+    #     }
+        
+    def configure_optimizers(model):
+        optimizer = Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
+        scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2, eta_min=1e-6)
         return {
-            "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": scheduler,
-                "frequency": 1,
-                "interval": 'step'
-            }
+        "optimizer": optimizer,
+        "lr_scheduler": {
+            "scheduler": scheduler,
+            "interval": "epoch",
+            "frequency": 1
         }
+    }
+
 
 
 # ======================
@@ -274,22 +298,23 @@ def main():
     # Configure trainer with progress bar and checkpointing
     trainer = pl.Trainer(
         max_epochs=num_epochs,
-        check_val_every_n_epoch=5,
+        #check_val_every_n_epoch=5,
         accelerator="auto",
         devices=[1],
         default_root_dir=SAVE_DIR,
         logger=TensorBoardLogger(
             save_dir=SAVE_DIR,
-            name="lightning_logs"  # Dossier où sont stockés les logs
-        )
+            name="lightning_logs" ), # Dossier où sont stockés les logs
+        accumulate_grad_batches=4  # Accumulate gradients over 4 batches
+        
     )
 
     # Start training
     trainer.fit(model, train_loader, val_loader)
     
-    #Test
-    print("Starting test phase...")
-    trainer.test(model, dataloaders=test_loader)
+    # #Test
+    # print("Starting test phase...")
+    # trainer.test(model, dataloaders=test_loader)
 
 
 if __name__ == "__main__":
