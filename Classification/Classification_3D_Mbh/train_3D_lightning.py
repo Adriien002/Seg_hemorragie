@@ -16,21 +16,22 @@ from pathlib import Path
 import monai.transforms as T
 from monai.data import PersistentDataset, DataLoader
 from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 
 import warnings
 warnings.filterwarnings("ignore", "You are using `torch.load` with `weights_only=False`*.")
 
 # === Hyperparams ===
 NUM_CLASSES = 6
-BATCH_SIZE = 32
-EPOCHS = 80
+BATCH_SIZE = 8
+EPOCHS = 1000
 LR = 1e-3
 CLASS_NAMES = ['any', 'epidural', 'intraparenchymal', 'intraventricular', 'subarachnoid', 'subdural']
 DEVICE = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
 SAVE_DIR = "/home/tibia/Projet_Hemorragie/MBH_3D_Classif"
 
 class ClassifierModule(pl.LightningModule):
-    def __init__(self, config = None):
+    def __init__(self, config = None,pos_weights=None):
         super().__init__()
         self.save_hyperparameters()
 
@@ -42,6 +43,7 @@ class ClassifierModule(pl.LightningModule):
 
         # Get positional weights
         self.loss_fn = self._get_lossfn()
+        self.pos_weights = pos_weights.to(DEVICE) if pos_weights is not None else torch.ones(NUM_CLASSES, device=DEVICE)
         
         # Set up per-class metrics
         self.val_auc = MultilabelAUROC(num_labels=self.num_classes, average=None)
@@ -165,7 +167,19 @@ class ClassifierModule(pl.LightningModule):
         }
     }
     
-
+def calculate_pos_weights(csv_path, label_cols):
+    """Calculate pos_weight for BCEWithLogitsLoss based on class frequency."""
+    df = pd.read_csv(csv_path)
+    pos_weights = []
+    for col in label_cols:
+        pos_count = df[col].sum()
+        neg_count = len(df) - pos_count
+        if pos_count > 0:
+            pos_weight = neg_count / pos_count
+        else:
+            pos_weight = 1.0  # Default weight if no positive samples
+        pos_weights.append(pos_weight)
+    return torch.tensor(pos_weights, dtype=torch.float)
 
 def main():
     # ---- Config ----
@@ -184,10 +198,11 @@ def main():
         "label": np.array([row[col] for col in label_cols], dtype=np.float32)
     }
         for _, row in df.iterrows()
+        
 ]
 
-# ---- Transforms CORRIGÉES ----
-    window_preset = {"window_center": 40, "window_width": 80}
+    pos_weights = calculate_pos_weights(csv_path, label_cols)
+    print(f"Pos weights: {dict(zip(label_cols, pos_weights.tolist()))}")
 
     train_transforms = T.Compose([
     # Load image only
@@ -209,8 +224,8 @@ def main():
     # Intensity normalization
         T.ScaleIntensityRanged(
             keys=["image"],
-            a_min=window_preset["window_center"] - window_preset["window_width"] // 2,
-            a_max=window_preset["window_center"] + window_preset["window_width"] // 2,
+            a_min=-10,
+            a_max=140,
             b_min=0.0,
             b_max=1.0,
             clip=True
@@ -264,8 +279,8 @@ def main():
         T.ResizeWithPadOrCropd(keys=["image"], spatial_size=(224, 224, 144), mode="constant", constant_values=0),
         T.ScaleIntensityRanged(
             keys=["image"],
-            a_min=window_preset["window_center"] - window_preset["window_width"] // 2,
-            a_max=window_preset["window_center"] + window_preset["window_width"] // 2,
+            a_min=-10,
+            a_max=140,
             b_min=0.0,
             b_max=1.0,
             clip=True
@@ -303,17 +318,21 @@ def main():
 )
     print(f"Validation dataset ready with {len(val_dataset)} samples and cached transforms at {val_cache_dir}")
 
-    model =ClassifierModule()
+    model =ClassifierModule(pos_weights=pos_weights)
     
     trainer = pl.Trainer(
         max_epochs=EPOCHS,
         accelerator="auto",
-        devices=[1],
+        devices=[0],
         default_root_dir=SAVE_DIR,
         logger=TensorBoardLogger(
             save_dir=SAVE_DIR,
             name="lightning_logs"  # Dossier où sont stockés les logs
-        )
+        ),
+        callbacks=[
+            EarlyStopping(monitor="val_loss", patience=100, mode="min"),
+            ModelCheckpoint(monitor="val_loss", mode="min", save_top_k=1, filename="best-checkpoint-{epoch:02d}-{val_loss:.2f}")
+        ]
     )
 
     trainer.fit(model, train_loader, val_loader)
