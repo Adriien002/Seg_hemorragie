@@ -20,8 +20,14 @@ from transformers import get_linear_schedule_with_warmup
 import pandas as pd
 import numpy as np
 from pathlib import Path
+from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
+warnings.filterwarnings(
+    "ignore",
+    message="You are using `torch.load` with `weights_only=False`*",
+    category=FutureWarning,
+)
 
-warnings.filterwarnings("ignore", message="You are using `torch.load` with `weights_only=False`")
+warnings.filterwarnings("ignore", message="You are using torch.load with weights_only=False")
 
 # ======================
 # CONFIGURATION
@@ -86,16 +92,16 @@ class BasicUNetWithClassification(nn.Module):
 
         self.final_conv = Conv["conv", spatial_dims](fea[5], out_channels, kernel_size=1)
 
-        # Classification head → à partir du bottleneck `x4`
+        # Classification head → à partir du bottleneck x4
         self.cls_head = nn.Sequential(
             nn.AdaptiveAvgPool3d((4, 4, 4)),
             nn.Flatten(),
             nn.Linear(fea[4] * 4 * 4 * 4, 512),
-            nn.BatchNorm1d(512),
+            nn.LayerNorm(512), #nn.BatchNorm1d(512)
             nn.LeakyReLU(inplace=True),
             nn.Dropout(0.5),
             nn.Linear(512, 256),
-            nn.BatchNorm1d(256),
+            nn.LayerNorm(256), #nn.BatchNorm1d(256)
             nn.LeakyReLU(inplace=True),
             nn.Dropout(0.3),
             nn.Linear(256, num_cls_classes)
@@ -117,9 +123,9 @@ class BasicUNetWithClassification(nn.Module):
         seg_logits = self.final_conv(u1)
 
         # Classification
-        cls_logits = self.cls_head(x4)  # x4 est le bottleneck
+        #cls_logits = self.cls_head(x4)  # x4 est le bottleneck
 
-        return seg_logits, cls_logits
+        return seg_logits # , cls_logits
     
 
 
@@ -170,7 +176,7 @@ def get_classification_data(split="train"):
 def get_multitask_dataset(split="train"):
     seg_data = get_segmentation_data(split)
     cls_data = get_classification_data(split)
-    return seg_data + cls_data
+    return seg_data + cls_data[:len(seg_data)]  # équilibrer les tâches pour le multitâche
 
 
 
@@ -181,12 +187,14 @@ def get_multitask_dataset(split="train"):
 
 
 
-class TaskBasedTransform(T.MapTransform):
+class TaskBasedTransform:
     """
     Applique un pipeline différent selon la tâche : "segmentation" ou "classification".
     """
     def __init__(self, keys):
-        super().__init__(keys)
+        
+        print(">>> TaskBasedTransform initialized")
+
         self.window_preset = {"window_center": 40, "window_width": 80}
 
         self.seg_pipeline = T.Compose([
@@ -198,8 +206,8 @@ class TaskBasedTransform(T.MapTransform):
             T.SpatialPadd(keys=["image", "label"], spatial_size=(96, 96, 96)),
             T.ScaleIntensityRanged(
                 keys=["image"],
-                a_min=self.window_preset["window_center"] - self.window_preset["window_width"] // 2,
-                a_max=self.window_preset["window_center"] + self.window_preset["window_width"] // 2,
+                a_min=-10,
+                a_max=140,
                 b_min=0.0, b_max=1.0, clip=True
             ),
             T.RandCropByPosNegLabeld(
@@ -208,7 +216,7 @@ class TaskBasedTransform(T.MapTransform):
                 label_key='label',
                 pos=5.0,
                 neg=1.0,
-                spatial_size=(96, 96, 64),
+                spatial_size=(96, 96, 96),
                 num_samples=2
             ),
             T.RandFlipd(keys=["image", "label"], spatial_axis=[0, 1], prob=0.5),
@@ -245,30 +253,39 @@ class TaskBasedTransform(T.MapTransform):
         else:
             raise ValueError(f"Tâche inconnue : {task}")
         
-def get_multitask_transforms():
-    return TaskBasedTransform(keys=["image", "label"])
+# def get_multitask_transforms():
+#     return TaskBasedTransform(keys=["image", "label"])
    
-       
+
         
-class TaskBasedValTransform(T.MapTransform):
+class TaskBasedValTransform:
     """
     Transformations de validation — une pipeline par tâche, sans augmentation aléatoire.
     """
     def __init__(self, keys):
-        super().__init__(keys)
+        
+        print(">>> TaskBasedTransform initialized")
         self.window_preset = {"window_center": 40, "window_width": 80}
+   # Loading transforms
+  # Ensure we load both image and segmentation
+
+ # who cares about the background ?
+  # make sure all images are the same orientation
+   # to isotropic spacing
+ # make sure we have at least 96 slices
 
         self.seg_pipeline = T.Compose([
-            T.LoadImaged(keys=["image", "label"], image_only=True),
+            T.Lambda(lambda x: print("Segmentation pipeline appelée") or x),
+            T.LoadImaged(keys=["image", "label"], image_only=False),
             T.EnsureChannelFirstd(keys=["image", "label"]),
             T.CropForegroundd(keys=["image", "label"], source_key='image'),
             T.Orientationd(keys=["image", "label"], axcodes='RAS'),
-            T.Spacingd(keys=["image", "label"], pixdim=(1.0, 1.0, 1.0), mode=["bilinear", "nearest"]),
+            T.Spacingd(keys=["image", "label"], pixdim=(1., 1., 1.), mode=["bilinear", "nearest"]),
             T.SpatialPadd(keys=["image", "label"], spatial_size=(96, 96, 96)),
             T.ScaleIntensityRanged(
                 keys=["image"],
-                a_min=self.window_preset["window_center"] - self.window_preset["window_width"] // 2,
-                a_max=self.window_preset["window_center"] + self.window_preset["window_width"] // 2,
+                a_min=-10,
+                a_max=140,
                 b_min=0.0, b_max=1.0, clip=True
             )
         ])
@@ -288,17 +305,20 @@ class TaskBasedValTransform(T.MapTransform):
             T.ToTensord(keys=["image", "label"])
         ])
 
+
     def __call__(self, data):
-        task = data["task"]
-        if task == "segmentation":
+        print("Pipeline called for task:", data["task"])
+        if data["task"] == "segmentation":
             return self.seg_pipeline(data)
-        elif task == "classification":
+        elif data["task"] == "classification":
             return self.cls_pipeline(data)
         else:
-            raise ValueError(f"Tâche inconnue : {task}")
+            raise ValueError(f"Tâche inconnue : {data['task']}")
         
-def get_multitask_val_transforms():
-    return TaskBasedValTransform(keys=["image", "label"])
+# def get_multitask_val_transforms():
+
+#     return TaskBasedValTransform(keys=["image", "label"])
+
 
 # ======================
 # DATA COLLATE FUNCTION pour le multi-tâche et bien loader les batchs
@@ -322,10 +342,11 @@ def multitask_collate_fn(batch):
     segmentation_batch = []
 
     for item in flat_batch:
-        if item["task"] == "classification":
-            classification_batch.append(item)
-        elif item["task"] == "segmentation":
+        # if item["task"] == "classification":
+        #     classification_batch.append(item)
+        if item["task"] == "segmentation":
             segmentation_batch.append(item)
+           
         else:
             raise ValueError(f"Tâche inconnue : {item['task']}")
 
@@ -338,33 +359,14 @@ def multitask_collate_fn(batch):
 
 # Gestion equilibrage des classes
 # TODO : ajouter un sur-échantillonnage pour la segmentation si nécessaire
-# def multitask_collate_fn(batch):
-#     flat_batch = list(flatten(batch))
-    
-#     classification_batch = [item for item in flat_batch if item["task"] == "classification"]
-#     segmentation_batch = [item for item in flat_batch if item["task"] == "segmentation"]
-    
-#     # Suréchantillonnage : répéter les échantillons de segmentation
-#     seg_repeat = max(1, len(classification_batch) // len(segmentation_batch))
-#     segmentation_batch = segmentation_batch * seg_repeat
-    
-#     # Mélanger pour éviter un biais d'ordre
-#     import random
-#     random.shuffle(segmentation_batch)
-#     random.shuffle(classification_batch)
-    
-#     result = {
-#         "classification": list_data_collate(classification_batch) if classification_batch else None,
-#         "segmentation": list_data_collate(segmentation_batch) if segmentation_batch else None
-#     }
-    
-#     return result
+
+
 
 # ======================
 # LIGHTNING MODULE
 # ======================
 class MultiTaskHemorrhageModule(pl.LightningModule):
-    def __init__(self, num_steps: int, seg_weight: float = 8.0, cls_weight: float = 1.0):
+    def __init__(self, num_steps: int, seg_weight: float = 1.0, cls_weight: float = 0.5):
         super().__init__()
         self.save_hyperparameters()
         
@@ -382,7 +384,7 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
         
         # Fonctions de perte
         self.seg_loss_fn = DiceCELoss(include_background=False, to_onehot_y=True, softmax=True)
-        self.cls_loss_fn = nn.BCEWithLogitsLoss()
+        # self.cls_loss_fn = nn.BCEWithLogitsLoss()
         
         # Métriques de segmentation
         self.seg_dice_metric = DiceHelper(
@@ -393,10 +395,10 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
         )
         
         # Métriques de classification
-        self.cls_auc = MultilabelAUROC(num_labels=NUM_CLASSES, average=None)
-        self.cls_mean_auc = MultilabelAUROC(num_labels=NUM_CLASSES)
-        self.cls_mean_precision = MultilabelPrecision(num_labels=NUM_CLASSES, threshold=0.5)
-        self.cls_mean_recall = MultilabelRecall(num_labels=NUM_CLASSES, threshold=0.5)
+        # self.cls_auc = MultilabelAUROC(num_labels=NUM_CLASSES, average=None)
+        # self.cls_mean_auc = MultilabelAUROC(num_labels=NUM_CLASSES)
+        # self.cls_mean_precision = MultilabelPrecision(num_labels=NUM_CLASSES, threshold=0.5)
+        # self.cls_mean_recall = MultilabelRecall(num_labels=NUM_CLASSES, threshold=0.5)
         
     def forward(self, x):
         return self.model(x)
@@ -404,28 +406,29 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         total_loss = 0.0
 
-        if batch["classification"] is not None:
-            x_cls = batch["classification"]["image"]
-            y_cls = batch["classification"]["label"]
+    #     # if batch["classification"] is not None:
+    #     #     x_cls = batch["classification"]["image"]
+    #     #     y_cls = batch["classification"]["label"]
 
-        # Forward pass
-            _ ,cls_logits = self.model(x_cls)
+    #     # # Forward pass
+    #     #     _ ,cls_logits = self.model(x_cls)
 
-        # Loss classification
-            loss_cls = self.cls_loss_fn(cls_logits, y_cls)* self.cls_weight
-            total_loss += loss_cls
+    #     # # Loss classification
+    #     #     loss_cls = self.cls_loss_fn(cls_logits, y_cls)* self.cls_weight
+    #     #     total_loss += loss_cls
 
-        # Log etc.
+    #     # Log etc.
 
         if batch["segmentation"] is not None:
             x_seg = batch["segmentation"]["image"]
             y_seg = batch["segmentation"]["label"]
 
         # Forward pass
-            seg_logits,_ = self.model(x_seg)
+            seg_logits = self.model(x_seg)
+            #seg_logits,_ = self.model(x_seg)
 
         # Loss segmentation
-            loss_seg = self.seg_loss_fn(seg_logits, y_seg)* self.seg_weight
+            loss_seg = self.seg_loss_fn(seg_logits, y_seg)
             total_loss += loss_seg
 
         # Log à compléter
@@ -438,28 +441,32 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
 
         self.log("train_loss", total_loss, batch_size=batch_size, on_step=True, on_epoch=True, prog_bar=True)
         
+        if loss_seg is not None:
+            self.log("train_seg_loss", loss_seg, batch_size=batch_size, on_step=True, on_epoch=True)
+
         # self.log("train_seg_loss", loss_seg, on_step=True, on_epoch=True)
         # self.log("train_cls_loss", loss_cls, on_step=True, on_epoch=True)
 
         return total_loss
+    
         
     def validation_step(self, batch,batch_idx):
         
         total_loss = 0.0
         
-        if batch["classification"] is  not None : 
-                x_cls = batch["classification"]["image"]
-                y_cls = batch["classification"]["label"]
+    #     # if batch["classification"] is  not None : 
+    #     #         x_cls = batch["classification"]["image"]
+    #     #         y_cls = batch["classification"]["label"]
                 
-                _ , y_hat_cls = self.model(x_cls)
-                loss_cls = self.cls_loss_fn(y_hat_cls, y_cls)* self.cls_weight
-                y_cls_pred = torch.sigmoid(y_hat_cls).as_tensor()
-                self.cls_auc.update(y_cls_pred, y_cls.int())
-                self.cls_mean_auc.update(y_cls_pred, y_cls.int())
-                self.cls_mean_precision.update(y_cls_pred, y_cls.int())
-                self.cls_mean_recall.update(y_cls_pred, y_cls.int())
+    #     #         _ , y_hat_cls = self.model(x_cls)
+    #     #         loss_cls = self.cls_loss_fn(y_hat_cls, y_cls)* self.cls_weight
+    #     #         y_cls_pred = torch.sigmoid(y_hat_cls).as_tensor()
+    #     #         self.cls_auc.update(y_cls_pred, y_cls.int())
+    #     #         self.cls_mean_auc.update(y_cls_pred, y_cls.int())
+    #     #         self.cls_mean_precision.update(y_cls_pred, y_cls.int())
+    #     #         self.cls_mean_recall.update(y_cls_pred, y_cls.int())
                 
-                total_loss += loss_cls
+    #     #         total_loss += loss_cls
                 
         if batch["segmentation"] is not None:
                 x_seg = batch["segmentation"]["image"]
@@ -469,10 +476,10 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
                     x_seg,
                     roi_size=(96, 96, 96),
                     sw_batch_size=2,
-                    predictor=lambda x: self.model(x)[0]
+                    predictor=lambda x: self.model(x)#[0]
                 )
                 
-                loss_seg = self.seg_loss_fn(y_hat_seg, y_seg)* self.seg_weight
+                loss_seg = self.seg_loss_fn(y_hat_seg, y_seg)
                 scores, _ = self.seg_dice_metric(y_hat_seg, y_seg)
                
                 y_labels = y_seg.unique().long().tolist()[1:]
@@ -493,73 +500,214 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
 
         self.log("val_loss", total_loss, batch_size=batch_size, on_step=False, on_epoch=True, prog_bar=True )    
 
-        
+    
+
+    # def training_step(self, batch, batch_idx):
+    #     x, y = batch["image"], batch["seg"]
+    #     y_logits = self.model(x)
+
+    #     loss = self.seg_loss_fn(y_logits, y)
+
+    #     self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
+
+    #     lr = self.trainer.lr_scheduler_configs[0].scheduler.optimizer.param_groups[0]["lr"]
+    #     self.log("lr", lr, on_step=True, prog_bar=True)
+
+    #     return loss
+
+    # def validation_step(self, batch, batch_idx):
+    #     x, y = batch["image"], batch["seg"]
+
+    #     y_hat = sliding_window_inference(x,
+    #                                      roi_size=(96, 96, 96),
+    #                                      sw_batch_size=2,
+    #                                      predictor=self.model)
+
+    #     # Loss
+    #     loss = self.seg_loss_fn(y_hat, y)
+
+    #     scores, _ = self.seg_dice_metric(y_hat, y)
+
+    #     y_labels = y.unique().long().tolist()[1:]
+    #     scores = {label: scores[0][label - 1].item() for label in y_labels}
+
+    #     metrics = {f'dice_c{label}': score for label, score in scores.items()}
+    #     metrics['val_loss'] = loss
+
+    #     self.log_dict(metrics, on_epoch=True, prog_bar=True)
+
+    #     return loss
                 
     
-    def on_validation_epoch_end(self):
-    # === CLASSIFICATION ===
-        if len(self.cls_auc.preds) > 0:
-            class_auc = self.cls_auc.compute()
-            mean_auc = self.cls_mean_auc.compute()
-            mean_precision = self.cls_mean_precision.compute()
-            mean_recall = self.cls_mean_recall.compute()
+    # def on_validation_epoch_end(self):
+    # # === CLASSIFICATION ===
+    #     if len(self.cls_auc.preds) > 0:
+    #         class_auc = self.cls_auc.compute()
+    #         mean_auc = self.cls_mean_auc.compute()
+    #         mean_precision = self.cls_mean_precision.compute()
+    #         mean_recall = self.cls_mean_recall.compute()
 
-            self.log_dict({
-                'val_mean_auc': mean_auc,
-                'val_mean_precision': mean_precision,
-                'val_mean_recall': mean_recall
-            }, on_epoch=True, prog_bar=True)
+    #         self.log_dict({
+    #             'val_mean_auc': mean_auc,
+    #             'val_mean_precision': mean_precision,
+    #             'val_mean_recall': mean_recall
+    #         }, on_epoch=True, prog_bar=True)
 
-            for i in range(NUM_CLASSES):
-                self.log(f'val_auc_class_{i}', class_auc[i].item(), on_epoch=True)
+    #         for i in range(NUM_CLASSES):
+    #             self.log(f'val_auc_class_{i}', class_auc[i].item(), on_epoch=True)
 
-            self.cls_auc.reset()
-            self.cls_mean_auc.reset()
-            self.cls_mean_precision.reset()
-            self.cls_mean_recall.reset()
+    #         self.cls_auc.reset()
+    #         self.cls_mean_auc.reset()
+    #         self.cls_mean_precision.reset()
+    #         self.cls_mean_recall.reset()
         
+    # def configure_optimizers(self):
+    #     optimizer = torch.optim.Adam(self.parameters(), lr=1e-3, weight_decay=1e-5)
+
+    #     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    #     optimizer,
+    #     mode='min',
+    #     factor=0.5,
+    #     patience=5,
+    #     verbose=True
+    # )
+
+    #     return {
+    #     "optimizer": optimizer,
+    #     "lr_scheduler": {
+    #         "scheduler": scheduler,
+    #         "monitor": "val_loss",
+    #         "interval": "epoch",
+    #         "frequency": 1
+    #     }
+    # }
+          
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=1e-3, weight_decay=1e-5)
 
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        mode='min',
-        factor=0.5,
-        patience=5,
-        verbose=True
-    )
-
+        optimizer = SGD(self.parameters(), lr=1e-3, momentum=0.99, nesterov=True, weight_decay=0.00003)
+        scheduler = get_linear_schedule_with_warmup(optimizer,
+                                                    num_warmup_steps=0,
+                                                    num_training_steps=self.num_steps)
         return {
-        "optimizer": optimizer,
-        "lr_scheduler": {
-            "scheduler": scheduler,
-            "monitor": "val_loss",
-            "interval": "epoch",
-            "frequency": 1
-        }
-    }
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "frequency": 1,
+                "interval": 'step'
+            }
+         }
+
 
 # ======================
 # TRAINING SETUP
 # ======================
 def main():
-    num_epochs = 100
-    batch_size = 8
+    num_epochs = 1000
+    batch_size = 2
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     
     # Préparation des données
-    train_data = get_multitask_dataset("train")
-    val_data = get_multitask_dataset("val")
-    
-    print(f"Training samples: {len(train_data)}")
-    print(f"Validation samples: {len(val_data)}")
+    # train_data = get_multitask_dataset("train")
+    # val_data = get_multitask_dataset("val")
+   
+    train_data= get_segmentation_data("train") 
+    val_data = get_segmentation_data("val")
+
+    # print(f"Training samples: {len(train_data)}")
+    # print(f"Validation samples: {len(val_data)}")
     
     # Transforms
-    train_transforms, val_transforms = get_multitask_transforms(), get_multitask_val_transforms()
-    
+    train_transforms, val_transforms = TaskBasedTransform(keys=["image", "label"]), TaskBasedValTransform(keys=["image", "label"])
+    # train_transforms = T.Compose([
+    # # Loading transforms
+    # T.LoadImaged(keys=["image", "label"]),
+    # T.EnsureChannelFirstd(keys=["image", "label"]),
+    # T.CropForegroundd(keys=['image', 'label'], source_key='image'), # who cares about the background ?
+    # T.Orientationd(keys=["image", "label"], axcodes='RAS'),  # make sure all images are the same orientation
+    # T.Spacingd(keys=["image", "label"], pixdim=(1., 1., 1.), mode=['bilinear', 'nearest']), # to isotropic spacing
+    # T.SpatialPadd(keys=["image", "label"], spatial_size=(96, 96, 96)),  # make sure we have at least 96 slices
+    # T.ScaleIntensityRanged(keys=["image"], a_min=-10, a_max=140, b_min=0.0, b_max=1.0, clip=True),  # clip images
+
+    # # Let's crop 2 patches per case using positive negative instead of class by class
+    # T.RandCropByPosNegLabeld(
+    #    keys=['image', 'label'],
+    #    image_key='image',
+    #    label_key='label',
+    #     pos=5.0,
+    #     neg=1.0,
+    #     spatial_size=(96, 96, 96),
+    #     num_samples=2
+    # ),
+    # # T.RandCropByLabelClassesd(
+    # #     keys=["image", "seg"],
+    # #     label_key="seg",
+    # #     spatial_size=(128, 128, 64),  # Taille adaptée aux EDH/SDH
+    # #     num_classes=6,
+    # #     ratios=[0.1, 0.25, 0.15, 0.1, 0.2, 0.2],  # Priorité EDH(1), SAH(2)
+    # #     num_samples=4
+    # # ),
+    # # T.RandCropByLabelClassesd(
+    # # keys=["image", "seg"],
+    # # label_key="seg",
+    # # spatial_size=(96, 96, 96),  
+    # # num_classes=6,
+    # # ratios=[0.1, 0.3, 0.1, 0.1, 0.1, 0.1],  # + de poids pour les classes rares (classe 1 ici à 0.3 par ex)
+    # # num_samples=4, 
+    # # ),
+
+    # # Data augmentations
+    # # For intensity augmentations, small random transforms but often
+    # # For spatial augmentations, only along the sagittal and coronal axis
+    # T.RandScaleIntensityd(
+    #     keys=['image'],
+    #     factors=0.02,
+    #     prob=0.5
+    # ),
+    # T.RandShiftIntensityd(
+    #    keys=['image'],
+    #     offsets=0.05,
+    #     prob=0.5
+    # ),
+    # T.RandRotate90d(
+    #     keys=['image', 'label'],
+    #     prob=0.5,
+    #     max_k=2,
+    #     spatial_axes=(0, 1)
+    # ),
+    # T.RandFlipd(
+    #     keys=['image', 'label'],
+    #     prob=0.5,
+    #     spatial_axis=[0, 1]
+    # )
+    # T.RandAffined(
+    # keys=['image', 'seg'],
+    # prob=0.3,
+    # rotate_range=(0, 0, 0.1),  # Petite rotation seulement en axial (Z)
+    # scale_range=(0.1, 0.1, 0),  # Léger zoom dans le plan axial
+    # mode=['bilinear', 'nearest'],
+    # padding_mode='border'
+    # ),
+
+    # T.RandAdjustContrastd(
+    # keys=['image'],
+    # gamma=(0.7, 1.5),  # Gamme plus large pour capturer EDH subtils
+    # prob=0.5
+    # )
+# ])
+
+#     val_transforms = T.Compose([
+#     # Loading transforms
+#     T.LoadImaged(keys=["image", "label"]),
+#     T.EnsureChannelFirstd(keys=["image", "label"]),
+#     T.CropForegroundd(keys=['image', 'label'], source_key='image'), # who cares about the background ?
+#     T.Orientationd(keys=["image", "label"], axcodes='RAS'),  # make sure all images are the same orientation
+#     T.Spacingd(keys=["image", "label"], pixdim=(1., 1., 1.), mode=['bilinear', 'nearest']), # to isotropic spacing
+#     T.SpatialPadd(keys=["image", "label"], spatial_size=(96, 96, 96)),  # make sure we have at least 96 slices
+#     T.ScaleIntensityRanged(keys=["image"], a_min=-10, a_max=140, b_min=0.0, b_max=1.0, clip=True),  # clip images
+# ])
     # Datasets
     train_dataset = PersistentDataset(
-        train_data,
+        train_data, #train_data,
         transform=train_transforms,
         cache_dir=os.path.join(SAVE_DIR, "cache_train")
     )
@@ -582,11 +730,11 @@ def main():
     
     val_loader = DataLoader(
         val_dataset, 
-        batch_size=1, 
+        batch_size=1, # ou 2 
         shuffle=False, 
         num_workers=8,
         persistent_workers=True,
-        collate_fn=multitask_collate_fn
+       collate_fn=multitask_collate_fn
     )
     
     # Modèle
@@ -600,13 +748,19 @@ def main():
         accelerator="auto",
         devices=[1],
         default_root_dir=SAVE_DIR,
-        logger=TensorBoardLogger(
-            save_dir=SAVE_DIR,
-            name="multitask_logs"
-        ),
-        gradient_clip_val=1.0,  # Gradient clipping pour la stabilité
+        logger=TensorBoardLogger( save_dir=SAVE_DIR, name="multitask_logs"),
+        #gradient_clip_val=1.0,  # Gradient clipping pour la stabilité
         log_every_n_steps=50,
-        accumulate_grad_batches=4 # Ajout car pour gérer les petites tailles de batch ( dues à limitation mémoire)
+        accumulate_grad_batches=4 ,# Ajout car pour gérer les petites tailles de batch ( dues à limitation mémoire)
+        precision='16-mixed',  # Mixed precision pour accélérer l'entraînement
+        callbacks=[
+            EarlyStopping(monitor='val_loss', patience=100, mode='min', verbose=True),
+            ModelCheckpoint( dirpath=SAVE_DIR,filename='best_model',monitor='val_loss', mode='min', save_top_k=2)
+        #fast_dev_run=True,  # Pour le debug rapide, à enlever pour l'entraînement complet
+        #profiler= simple_profiler.SimpleProfiler()  # Pour le profiling, à enlever si pas besoin
+        
+           
+        ]
     )
     
     # Entraînement
@@ -616,3 +770,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
+    
