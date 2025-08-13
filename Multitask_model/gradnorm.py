@@ -12,7 +12,7 @@ from monai.losses import DiceCELoss
 from monai.metrics import DiceHelper
 from monai.networks.nets import UNet
 import monai.transforms as T
-from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger 
 from torch.optim import SGD, Adam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torchmetrics.classification import MultilabelRecall, MultilabelAUROC, MultilabelPrecision
@@ -58,6 +58,30 @@ from monai.networks.blocks import Convolution, UpSample
 from monai.networks.layers.factories import Conv, Pool
 from monai.networks.nets.basic_unet import TwoConv, Down, UpCat
 from monai.utils import ensure_tuple_rep
+
+# Logger 
+
+config = dict(
+    sharing_type="hard",  # "soft" ou "fine_tune"
+    model="BasicUNetWithClassification",
+    loss_weighting="gradnorm",
+    dataset_size="full",
+    batch_size=2,
+    learning_rate=1e-3,
+    optimizer="sgd",
+    alpha_gradnorm=1.5,
+    seed=42
+)
+
+
+    
+wandb_logger = WandbLogger(
+project="hemorrhage_multitask_test",
+group="gradnorm",
+tags=["full_dataset", "hard", "sgd", "unet3d", "noponderation"],
+config=config
+)
+
 
 
 class BasicUNetWithClassification(nn.Module):
@@ -385,7 +409,7 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
     def __init__(self, num_steps: int, seg_weight: float = 1.0, cls_weight: float = 0.5):
         super().__init__()
         self.save_hyperparameters()
-        
+        self.automatic_optimization = False  # Pour GradNorm
         self.num_steps = num_steps
         self.seg_weight = seg_weight
         self.cls_weight = cls_weight
@@ -442,6 +466,50 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
       
     def forward(self, x):
         return self.model(x)
+
+    
+    def on_train_start(self):
+        """Calcule et stocke les pertes initiales pour l'algorithme GradNorm."""
+        
+        
+        self.model.eval()
+
+        # Prend un seul lot du DataLoader de formation
+        train_dataloader = self.trainer.train_dataloader
+        batch = next(iter(train_dataloader))
+       
+        x_cls = batch["classification"]["image"] if batch["classification"] is not None else None
+        y_cls = batch["classification"]["label"] if batch["classification"] is not None else None
+        
+        x_seg = batch["segmentation"]["image"] if batch["segmentation"] is not None else None
+        y_seg = batch["segmentation"]["label"] if batch["segmentation"] is not None else None
+
+        
+        if x_cls is not None:
+            x_cls, y_cls = x_cls.to(self.device), y_cls.to(self.device)
+            _ , cls_logits = self.model(x_cls)
+            initial_cls_loss = self.cls_loss_fn(cls_logits, y_cls).detach()
+        else:
+            initial_cls_loss = torch.tensor(0.0).to(self.device)
+            
+        if x_seg is not None:
+            x_seg, y_seg = x_seg.to(self.device), y_seg.to(self.device)
+            seg_logits, _ = self.model(x_seg)
+            initial_seg_loss = self.seg_loss_fn(seg_logits, y_seg).detach()
+        else:
+            initial_seg_loss = torch.tensor(0.0).to(self.device)
+
+        self.initial_losses = {
+            "seg": initial_seg_loss,
+            "cls": initial_cls_loss
+        }
+        
+        print(f"Pertes initiales calculées: seg_loss={initial_seg_loss.item():.4f}, cls_loss={initial_cls_loss.item():.4f}")
+        
+        # Remet le modèle en mode d'entraînement
+        self.model.train()
+
+
         
     def training_step(self, batch, batch_idx):
         total_loss = 0.0
@@ -479,11 +547,17 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
         shared_params = list(self.model.down_4.parameters())
 
             # 2. Calculer les normes de gradient pour chaque tâche
-        G_seg = torch.autograd.grad(self.w_seg * loss_seg, shared_params, retain_graph=True, create_graph=True)
-        G_seg_norm = torch.norm(torch.cat([g.reshape(-1) for g in G_seg]), 2)
-
-        G_cls = torch.autograd.grad(self.w_cls * loss_cls, shared_params, retain_graph=True, create_graph=True)
-        G_cls_norm = torch.norm(torch.cat([g.reshape(-1) for g in G_cls]), 2)
+        if loss_seg is not None :
+            G_seg = torch.autograd.grad(self.w_seg * loss_seg, shared_params, retain_graph=True, create_graph=True)
+            G_seg_norm = torch.norm(torch.cat([g.reshape(-1) for g in G_seg]), 2)
+        else:
+            G_seg_norm = torch.tensor(0.0, device=self.device)
+            
+        if loss_cls is not None:
+            G_cls = torch.autograd.grad(self.w_cls * loss_cls, shared_params, retain_graph=True, create_graph=True)
+            G_cls_norm = torch.norm(torch.cat([g.reshape(-1) for g in G_cls]), 2)
+        else:
+            G_cls_norm = torch.tensor(0.0, device=self.device)
 
             # 3. Moyenne des normes
         G_avg = (G_seg_norm + G_cls_norm) / self.task_num
@@ -512,7 +586,7 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
 
 
     # Backward sur perte totale (poids fixes à cette étape)
-        self.optimiszer_model.zero_grad()
+        self.optimiser_model.zero_grad()
         self.manual_backward(total_loss)
         self.optimiser_model.step()
         
@@ -534,7 +608,10 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
             self.log("train_seg_loss", loss_seg, batch_size=batch_size, on_step=True, on_epoch=True)
 
         if loss_cls is not None:
-            self.log("train_cls_loss", loss_cls, on_step=True, on_epoch=True)
+            self.log("train_cls_loss", loss_cls, batch_size=batch_size, on_step=True, on_epoch=True)
+        
+        self.log("w_seg", self.w_seg, prog_bar=True)
+        self.log("w_cls", self.w_cls, prog_bar=True)
       
 
         return total_loss
@@ -558,7 +635,7 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
                 self.cls_mean_precision.update(y_cls_pred, y_cls.int())
                 self.cls_mean_recall.update(y_cls_pred, y_cls.int())
                 
-                total_loss += loss_cls
+                total_loss += loss_cls* self.w_cls
                 
         if batch["segmentation"] is not None:
                 x_seg = batch["segmentation"]["image"]
@@ -582,7 +659,7 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
 
                 self.log_dict(metrics, on_epoch=True, prog_bar=True)
                 
-                total_loss += loss_seg
+                total_loss += loss_seg* self.w_seg
 
                 
                 # Log total loss
@@ -678,10 +755,10 @@ def main():
     # print(f"Pos weights: {dict(zip(CLASS_NAMES, pos_weights.tolist()))}")
     
     # Préparation des données
-    # train_data = get_multitask_dataset("train")
-    # val_data = get_multitask_dataset("val")
-    train_data=get_multitask_dataset_balanced('train')
-    val_data=get_multitask_dataset_balanced('val')
+    train_data = get_multitask_dataset("train")
+    val_data = get_multitask_dataset("val")
+    # train_data=get_multitask_dataset_balanced('train')
+    # val_data=get_multitask_dataset_balanced('val')
     # train_data= get_segmentation_data("train") 
     # val_data = get_segmentation_data("val")
 
@@ -732,13 +809,13 @@ def main():
     trainer = pl.Trainer(
         max_epochs=num_epochs,
         accelerator="auto",
-        devices=[1],
+        devices=[0],
         default_root_dir=SAVE_DIR,
-        logger=TensorBoardLogger( save_dir=SAVE_DIR, name="multitask_logs"),
-        automatic_optimization=False,
+        logger=wandb_logger,
+   
         #gradient_clip_val=1.0,  # Gradient clipping pour la stabilité
         log_every_n_steps=50,
-        accumulate_grad_batches=4 ,# Ajout car pour gérer les petites tailles de batch ( dues à limitation mémoire)
+        #accumulate_grad_batches=4 ,# Ajout car pour gérer les petites tailles de batch ( dues à limitation mémoire)
         precision='16-mixed',  # Mixed precision pour accélérer l'entraînement
         callbacks=[
             EarlyStopping(monitor='val_loss', patience=100, mode='min', verbose=True),
