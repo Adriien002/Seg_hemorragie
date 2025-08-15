@@ -11,7 +11,7 @@ from monai.data import DataLoader, PersistentDataset, Dataset
 from tqdm import tqdm
 import os
 from timeit import default_timer as timer
-
+import gc
 from torchmetrics.classification import MultilabelAUROC, MultilabelSpecificity, MultilabelRecall, MultilabelPrecision, MultilabelAccuracy
 from torch.optim.lr_scheduler import ConstantLR, CosineAnnealingWarmRestarts, SequentialLR
 from torch.optim.lr_scheduler import ReduceLROnPlateau
@@ -192,24 +192,23 @@ def train_epoch(model: torch.nn.Module,
                 optimizer: torch.optim.Optimizer,
                 scheduler: torch.optim.lr_scheduler,
                 device: torch.device = DEVICE):
-   
-    # mean_auc_metric = MultilabelAUROC(num_labels=NUM_CLASSES, average="macro").to(device)
-    # mean_recall_metric = MultilabelRecall(num_labels=NUM_CLASSES, threshold=0.5, average="macro").to(device)
-    # mean_precision_metric = MultilabelPrecision(num_labels=NUM_CLASSES, threshold=0.5, average="macro").to(device)
-    # # keep the per-class metrics for detailed analysis : only 1 beaucause memory is limited
-    # auc_metric = MultilabelAUROC(num_labels=NUM_CLASSES, average=None).to(device)
     
+
+    
+  
     model.train()
     train_loss = 0.0
     
     for i, batch in enumerate(dataloader):
         X = batch["image"].to(device)
         y = batch["label"].to(device)
-        
+      
+
+
         # Forward pass
         y_logits = model(X)
         loss = loss_fn(y_logits, y)
-        train_loss += loss.item()
+        train_loss += loss
         
         # zero grad
         optimizer.zero_grad()
@@ -220,54 +219,24 @@ def train_epoch(model: torch.nn.Module,
         # Optimizer step
         optimizer.step()
         
-        # Conversion en probabilités avec détachement du graphe
-        # with torch.no_grad():
-        #     y_probs = torch.sigmoid(y_logits)
-            
-        #     # Update metricse
-        #     mean_auc_metric.update(y_probs, y.int())
-        #     mean_recall_metric.update(y_probs, y.int())
-        #     mean_precision_metric.update(y_probs, y.int())
-        #     auc_metric.update(y_probs, y.int())
+        
         
         if (i % 400 == 0):
             print(f"Looked at {i * len(X)}/{len(dataloader.dataset)} samples")
+
     
     # Calcul des moyennes finales
     train_loss /= len(dataloader)
-    
-    # Compute 
-    # mean_auc = mean_auc_metric.compute()
-    # mean_recall = mean_recall_metric.compute()
-    # mean_precision = mean_precision_metric.compute()
-    # auc_per_class = auc_metric.compute()
-    
-    # # Reset to free memory
-    # mean_auc_metric.reset()
-    # mean_recall_metric.reset()
-    # mean_precision_metric.reset()
-    # auc_metric.reset()
-    
-    # # Conversion en float pour éviter de garder les tenseurs en mémoire
-    # mean_auc_val = mean_auc.item()
-    # mean_recall_val = mean_recall.item()
-    # mean_precision_val = mean_precision.item()
-    
-    # Affichage des résultats
-    # print(f"\nTrain Loss: {train_loss:.5f}")
-    # print(f"Mean AUC: {mean_auc_val:.4f} | Mean Recall: {mean_recall_val:.4f} | Mean Precision: {mean_precision_val:.4f}")
-    
-    # for i, class_name in enumerate(CLASS_NAMES):
-    #     print(f"{class_name}: AUC={auc_per_class[i]:.4f}")
-    
     return train_loss
 
 def val_epoch(model: torch.nn.Module,
               dataloader: torch.utils.data.DataLoader,
               loss_fn: torch.nn.Module,
               device: torch.device = DEVICE):
-    
-    # Métriques simplifiées (même structure que pour l'entraînement)
+    """
+    CORRECTION 7: Métriques seulement en validation, comme le doctorant
+    """
+    # Métriques - créées localement pour éviter les fuites
     mean_auc_metric = MultilabelAUROC(num_labels=NUM_CLASSES, average="macro").to(device)
     mean_recall_metric = MultilabelRecall(num_labels=NUM_CLASSES, threshold=0.5, average="macro").to(device)
     mean_precision_metric = MultilabelPrecision(num_labels=NUM_CLASSES, threshold=0.5, average="macro").to(device)
@@ -276,15 +245,15 @@ def val_epoch(model: torch.nn.Module,
     model.eval()
     val_loss = 0.0
     
-    with torch.inference_mode():
+    with torch.inference_mode():  # CORRECTION 8: inference_mode au lieu de no_grad
         for i, batch in enumerate(dataloader):
-            X = batch["image"].to(device)
-            y = batch["label"].to(device)
+            X = batch["image"].to(device, non_blocking=True)
+            y = batch["label"].to(device, non_blocking=True)
             
             # Forward pass
             y_logits = model(X)
             loss = loss_fn(y_logits, y)
-            val_loss += loss.item()
+            val_loss += loss
             
             # Conversion en probabilités
             y_probs = torch.sigmoid(y_logits)
@@ -294,49 +263,57 @@ def val_epoch(model: torch.nn.Module,
             mean_recall_metric.update(y_probs, y.int())
             mean_precision_metric.update(y_probs, y.int())
             auc_metric.update(y_probs, y.int())
+            
+            if (i % 400 == 0):
+                print(f"Looked at {i * len(X)}/{len(dataloader.dataset)} samples")
     
     # Calcul des moyennes finales
     val_loss /= len(dataloader)
     
-    # Compute 
+    # Compute
     mean_auc = mean_auc_metric.compute()
     mean_recall = mean_recall_metric.compute()
     mean_precision = mean_precision_metric.compute()
     auc_per_class = auc_metric.compute()
     
-    # Reset to free memory
+    # CORRECTION 11: Conversion immédiate en float
+    mean_auc_val = mean_auc.item()
+    mean_recall_val = mean_recall.item()
+    mean_precision_val = mean_precision.item()
+    auc_per_class_vals = [auc_per_class[i].item() for i in range(NUM_CLASSES)]
+    
+    # CORRECTION 12: Reset et suppression explicite des métriques
     mean_auc_metric.reset()
     mean_recall_metric.reset()
     mean_precision_metric.reset()
     auc_metric.reset()
     
-    # Conversion en float
-    mean_auc_val = mean_auc.item()
-    mean_recall_val = mean_recall.item()
-    mean_precision_val = mean_precision.item()
     
     # Affichage des résultats
     print(f"\nValidation Loss: {val_loss:.5f}")
     print(f"Val Mean AUC: {mean_auc_val:.4f} | Val Mean Recall: {mean_recall_val:.4f} | Val Mean Precision: {mean_precision_val:.4f}")
     
     for i, class_name in enumerate(CLASS_NAMES):
-        print(f"{class_name}: AUC={auc_per_class[i]:.4f}")
+        print(f"{class_name}: AUC={auc_per_class_vals[i]:.4f}")
     
     return val_loss, mean_auc_val, mean_recall_val, mean_precision_val
     
 def train_model(model, train_loader, val_loader, loss_fn, optimizer, epochs):
-    # Historique simplifié - on garde les métriques les plus importantes
+
     history = {
         'train_loss': [],
-        'val_loss': [], 'val_auc': [], 'val_recall': [], 'val_precision': []
+        'val_loss': [], 
+        'val_auc': [], 
+        'val_recall': [], 
+        'val_precision': []
     }
     
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    scheduler = ReduceLROnPlateau(
         optimizer, 
-        mode='max',          # Maximize AUC
-        factor=0.1,          # Dividing 10 times
+        mode='max',  # Maximize AUC
+        factor=0.1,
         patience=3,
-        verbose=True        
+        verbose=False      
     )
     
     for epoch in tqdm(range(epochs), desc="Training Epochs"):
@@ -344,33 +321,73 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer, epochs):
         print("-" * 50)
         
         # Training phase
-        train_loss = train_epoch(  
-            model, train_loader, loss_fn, optimizer, scheduler, DEVICE
-        )
+        train_loss = train_epoch(model, train_loader, loss_fn, optimizer, DEVICE)
         
         # Validation phase
-        val_loss, val_auc, val_recall, val_precision = val_epoch(  
-            model, val_loader, loss_fn, DEVICE
-        )
+        val_loss, val_auc, val_recall, val_precision = val_epoch(model, val_loader, loss_fn, DEVICE)
         
-        scheduler.step(val_auc)  
-
+        scheduler.step(val_auc)
+        
         # Sauvegarde de l'historique
         history['train_loss'].append(train_loss)
-        # history['train_auc'].append(train_auc)
-        # history['train_recall'].append(train_recall)
-        # history['train_precision'].append(train_precision)
-        
         history['val_loss'].append(val_loss)
         history['val_auc'].append(val_auc)
         history['val_recall'].append(val_recall)
         history['val_precision'].append(val_precision)
         
-        # Nettoyage mémoire GPU périodique
-        if epoch % 10 == 0:
+        
+        if epoch % 5 == 0:
             torch.cuda.empty_cache()
+            gc.collect()  # Garbage collection Python
     
     return history
+# def train_model(model, train_loader, val_loader, loss_fn, optimizer, epochs):
+#     # Historique simplifié - on garde les métriques les plus importantes
+#     history = {
+#         'train_loss': [],
+#         'val_loss': [], 'val_auc': [], 'val_recall': [], 'val_precision': []
+#     }
+    
+#     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+#         optimizer, 
+#         mode='max',          # Maximize AUC
+#         factor=0.1,          # Dividing 10 times
+#         patience=3,
+#         verbose=True        
+#     )
+    
+#     for epoch in tqdm(range(epochs), desc="Training Epochs"):
+#         print(f"\nEpoch {epoch+1}/{epochs}")
+#         print("-" * 50)
+        
+#         # Training phase
+#         train_loss = train_epoch(  
+#             model, train_loader, loss_fn, optimizer, scheduler, DEVICE
+#         )
+        
+#         # Validation phase
+#         val_loss, val_auc, val_recall, val_precision = val_epoch(  
+#             model, val_loader, loss_fn, DEVICE
+#         )
+        
+#         scheduler.step(val_auc)  
+
+#         # Sauvegarde de l'historique
+#         history['train_loss'].append(train_loss)
+#         # history['train_auc'].append(train_auc)
+#         # history['train_recall'].append(train_recall)
+#         # history['train_precision'].append(train_precision)
+        
+#         history['val_loss'].append(val_loss)
+#         history['val_auc'].append(val_auc)
+#         history['val_recall'].append(val_recall)
+#         history['val_precision'].append(val_precision)
+        
+#         # Nettoyage mémoire GPU périodique
+#         if epoch % 10 == 0:
+#             torch.cuda.empty_cache()
+    
+#     return history
   
  
        
@@ -391,8 +408,8 @@ def main():
     csv_train_path = Path("/home/tibia/Projet_Hemorragie/Seg_hemorragie/Classification/Classification_RSNA/data/csv/train_fold0.csv")
     csv_val_path = Path("/home/tibia/Projet_Hemorragie/Seg_hemorragie/Classification/Classification_RSNA/data/csv/val_fold0.csv")
     dicom_dir = Path("/home/tibia/Projet_Hemorragie/Seg_hemorragie/Classification/Classification_RSNA/data/rsna-intracranial-hemorrhage-detection/stage_2_train")
-    train_cache_dir = Path("./persistent_cache1/fold0_train")  
-    val_cache_dir = Path("./persistent_cache1/fold0_val")
+    train_cache_dir = Path("./persistent_cache2/fold0_train")  
+    val_cache_dir = Path("./persistent_cache2/fold0_val")
     
     label_cols = ['any', 'epidural', 'intraparenchymal', 'intraventricular', 'subarachnoid', 'subdural']
     
@@ -429,7 +446,7 @@ def main():
         train_dataset, 
         batch_size=BATCH_SIZE, 
         shuffle=True, 
-        num_workers=8,
+        num_workers=4,
         persistent_workers=True,
         pin_memory=True
     )
@@ -446,7 +463,7 @@ def main():
         val_dataset, 
         batch_size=BATCH_SIZE, 
         shuffle=False,  
-        num_workers=8,
+        num_workers=4,
         persistent_workers=True,
         pin_memory=True
     )

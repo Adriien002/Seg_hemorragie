@@ -18,13 +18,15 @@ warnings.filterwarnings("ignore", message="You are using `torch.load` with `weig
 # ======================
 # 1. CONFIGURATION
 # ======================
-DATASET_DIR = '/home/tibia/Projet_Hemorragie/mbh_seg/nii'
-SAVE_DIR = "/home/tibia/Projet_Hemorragie/MBH_swin_log_2"
+DATASET_DIR = '/home/tibia/Projet_Hemorragie/Seg_hemorragie/split_MONAI'
+SAVE_DIR = "/home/tibia/Projet_Hemorragie/MBH_swin_log_3"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
 # ======================
 # 2. DATA PIPELINE (same as your original)
 # ======================
+
+
 transforms = T.Compose([
     # Loading transforms
     T.LoadImaged(keys=["image", "seg"]),
@@ -227,7 +229,7 @@ def main():
         max_epochs=num_epochs,
         check_val_every_n_epoch=5,
         accelerator="auto",
-        devices=[0],
+        devices=[1],
         default_root_dir=SAVE_DIR,
         logger=TensorBoardLogger(
             save_dir=SAVE_DIR,

@@ -17,6 +17,8 @@ import monai.transforms as T
 from monai.data import PersistentDataset, DataLoader
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
+from torch.optim import SGD,Adam
+from transformers import get_linear_schedule_with_warmup
 
 import warnings
 warnings.filterwarnings("ignore", "You are using `torch.load` with `weights_only=False`*.")
@@ -28,13 +30,13 @@ EPOCHS = 1000
 LR = 1e-3
 CLASS_NAMES = ['any', 'epidural', 'intraparenchymal', 'intraventricular', 'subarachnoid', 'subdural']
 DEVICE = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
-SAVE_DIR = "/home/tibia/Projet_Hemorragie/MBH_3D_Classif"
+SAVE_DIR = "/home/tibia/Projet_Hemorragie/MBH_3D_Classif_cosine"
 
 class ClassifierModule(pl.LightningModule):
-    def __init__(self, config = None,pos_weights=None):
+    def __init__(self, config = None, pos_weights=None , num_steps = None):
         super().__init__()
         self.save_hyperparameters()
-
+        self.num_steps = num_steps
         self.num_classes = NUM_CLASSES
         self.class_names = CLASS_NAMES
 
@@ -135,51 +137,77 @@ class ClassifierModule(pl.LightningModule):
         self.val_mean_recall.reset()
         
         
-    def configure_optimizers(self):
+    # def configure_optimizers(self):
    
 
-    # === Optimizer ===
-        optimizer_name = "Adam"
-        lr = LR
+    # # === Optimizer ===
+    #     optimizer_name = "Adam"
+    #     lr = LR
 
-        if optimizer_name == "Adam":
-            optimizer = torch.optim.Adam(self.parameters(), lr=lr)
-        else:
-            raise NotImplementedError(f"Optimiseur {optimizer_name} non supporté.")
+    #     if optimizer_name == "Adam":
+    #         optimizer = torch.optim.Adam(self.parameters(), lr=lr)
+    #     else:
+    #         raise NotImplementedError(f"Optimiseur {optimizer_name} non supporté.")
 
-    # === Scheduler ===
-        scheduler = ReduceLROnPlateau(
-            optimizer,
-            mode='min',       
-            factor=0.1,
-            patience=3,
-            verbose=False
-    )
+    # # === Scheduler ===
+    #     scheduler = ReduceLROnPlateau(
+    #         optimizer,
+    #         mode='min',       
+    #         factor=0.1,
+    #         patience=3,
+    #         verbose=False
+    # )
 
-    # === Lightning format ===
+    # # === Lightning format ===
+    #     return {
+    #         "optimizer": optimizer,
+    #         "lr_scheduler": {
+    #             "scheduler": scheduler,
+    #             "monitor": "val_loss", 
+    #             "interval": "epoch",
+    #             "frequency": 1
+    #     }
+    # }
+    # def configure_optimizers(self):
+
+    #     optimizer = SGD(self.parameters(), lr=1e-3, momentum=0.99, nesterov=True, weight_decay=0.00003)
+    #     scheduler = get_linear_schedule_with_warmup(optimizer,
+    #                                                 num_warmup_steps=0,
+    #                                                 num_training_steps=self.num_steps)
+    #     return {
+    #         "optimizer": optimizer,
+    #         "lr_scheduler": {
+    #             "scheduler": scheduler,
+    #             "frequency": 1,
+    #             "interval": 'step'
+    #         }
+    #      }
+    def configure_optimizers(model):
+        optimizer = Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
+        scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2, eta_min=1e-6)
         return {
-            "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": scheduler,
-                "monitor": "val_loss", 
-                "interval": "epoch",
-                "frequency": 1
+        "optimizer": optimizer,
+        "lr_scheduler": {
+            "scheduler": scheduler,
+            "interval": "epoch",
+            "frequency": 1
         }
     }
+
     
-def calculate_pos_weights(csv_path, label_cols):
-    """Calculate pos_weight for BCEWithLogitsLoss based on class frequency."""
-    df = pd.read_csv(csv_path)
-    pos_weights = []
-    for col in label_cols:
-        pos_count = df[col].sum()
-        neg_count = len(df) - pos_count
-        if pos_count > 0:
-            pos_weight = neg_count / pos_count
-        else:
-            pos_weight = 1.0  # Default weight if no positive samples
-        pos_weights.append(pos_weight)
-    return torch.tensor(pos_weights, dtype=torch.float)
+# def calculate_pos_weights(csv_path, label_cols):
+#     """Calculate pos_weight for BCEWithLogitsLoss based on class frequency."""
+#     df = pd.read_csv(csv_path)
+#     pos_weights = []
+#     for col in label_cols:
+#         pos_count = df[col].sum()
+#         neg_count = len(df) - pos_count
+#         if pos_count > 0:
+#             pos_weight = neg_count / pos_count
+#         else:
+#             pos_weight = 1.0  # Default weight if no positive samples
+#         pos_weights.append(pos_weight)
+#     return torch.tensor(pos_weights, dtype=torch.float)
 
 def main():
     # ---- Config ----
@@ -201,8 +229,8 @@ def main():
         
 ]
 
-    pos_weights = calculate_pos_weights(csv_path, label_cols)
-    print(f"Pos weights: {dict(zip(label_cols, pos_weights.tolist()))}")
+    # pos_weights = calculate_pos_weights(csv_path, label_cols)
+    # print(f"Pos weights: {dict(zip(label_cols, pos_weights.tolist()))}")
 
     train_transforms = T.Compose([
     # Load image only
@@ -318,7 +346,7 @@ def main():
 )
     print(f"Validation dataset ready with {len(val_dataset)} samples and cached transforms at {val_cache_dir}")
 
-    model =ClassifierModule(pos_weights=pos_weights)
+    model =ClassifierModule(num_steps=len(train_loader) * EPOCHS)
     
     trainer = pl.Trainer(
         max_epochs=EPOCHS,
@@ -329,6 +357,8 @@ def main():
             save_dir=SAVE_DIR,
             name="lightning_logs"  # Dossier où sont stockés les logs
         ),
+        precision= '16-mixed',
+        accumulate_grad_batches=4,
         callbacks=[
             EarlyStopping(monitor="val_loss", patience=100, mode="min"),
             ModelCheckpoint(monitor="val_loss", mode="min", save_top_k=1, filename="best-checkpoint-{epoch:02d}-{val_loss:.2f}")

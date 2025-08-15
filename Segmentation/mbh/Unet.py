@@ -222,32 +222,32 @@ class HemorrhageModel(pl.LightningModule):
     #     return loss
 
         
-    # def configure_optimizers(self):
+    def configure_optimizers(self):
 
-    #     optimizer = SGD(self.parameters(), lr=1e-3, momentum=0.99, nesterov=True, weight_decay=0.00003)
-    #     scheduler = get_linear_schedule_with_warmup(optimizer,
-    #                                                 num_warmup_steps=0,
-    #                                                 num_training_steps=self.num_steps)
-    #     return {
-    #         "optimizer": optimizer,
-    #         "lr_scheduler": {
-    #             "scheduler": scheduler,
-    #             "frequency": 1,
-    #             "interval": 'step'
-    #         }
-    #     }
-        
-    def configure_optimizers(model):
-        optimizer = Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
-        scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2, eta_min=1e-6)
+        optimizer = SGD(self.parameters(), lr=1e-3, momentum=0.99, nesterov=True, weight_decay=0.00003)
+        scheduler = get_linear_schedule_with_warmup(optimizer,
+                                                    num_warmup_steps=0,
+                                                    num_training_steps=self.num_steps)
         return {
-        "optimizer": optimizer,
-        "lr_scheduler": {
-            "scheduler": scheduler,
-            "interval": "epoch",
-            "frequency": 1
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "frequency": 1,
+                "interval": 'step'
+            }
         }
-    }
+        
+    # def configure_optimizers(model):
+    #     optimizer = Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
+    #     scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2, eta_min=1e-6)
+    #     return {
+    #     "optimizer": optimizer,
+    #     "lr_scheduler": {
+    #         "scheduler": scheduler,
+    #         "interval": "epoch",
+    #         "frequency": 1
+    #     }
+    # }
 
 
 
@@ -288,7 +288,7 @@ def main():
         cache_dir=os.path.join(SAVE_DIR, "cache_val")
     )
 
-    train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True, num_workers=8)
+    train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True, num_workers=8)
     val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=8)
 
     # Initialize model with checkpoint if available
@@ -300,12 +300,12 @@ def main():
         max_epochs=num_epochs,
         #check_val_every_n_epoch=5,
         accelerator="auto",
-        devices=[1],
+        devices=[0],
         default_root_dir=SAVE_DIR,
         logger=TensorBoardLogger(
             save_dir=SAVE_DIR,
             name="lightning_logs" ), # Dossier où sont stockés les logs
-        accumulate_grad_batches=4  # Accumulate gradients over 4 batches
+        #accumulate_grad_batches=4  # Accumulate gradients over 4 batches
         
     )
 

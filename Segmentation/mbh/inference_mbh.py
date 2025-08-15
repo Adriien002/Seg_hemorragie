@@ -8,17 +8,18 @@ from monai.data import DataLoader, PersistentDataset
 from monai.inferers import sliding_window_inference
 from monai.losses import DiceCELoss
 from monai.metrics import DiceHelper
-from monai.networks.nets import SwinUNETR
+from monai.networks.nets import SwinUNETR,UNet
 import monai.transforms as T
 from pytorch_lightning import Trainer
+import nibabel as nib
 
 warnings.filterwarnings("ignore", message="You are using `torch.load` with `weights_only=False`")
 os.environ["PYTHONWARNINGS"] = "ignore"
 
 # Configuration
 DATASET_DIR = '/home/tibia/Projet_Hemorragie/mbh_seg/nii'
-CHECKPOINT_PATH = "/home/tibia/Projet_Hemorragie/MBH_swin_log_2/lightning_logs/version_0/checkpoints/epoch=999-step=78000.ckpt"
-SAVE_DIR = "/home/tibia/Projet_Hemorragie/inference"
+CHECKPOINT_PATH = "/home/tibia/Projet_Hemorragie/trleaning/lightning_logs/version_3/checkpoints/epoch=1249-step=96250.ckpt"
+SAVE_DIR = "/home/tibia/Projet_Hemorragie/inference3"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
 test_transforms = T.Compose([
@@ -40,12 +41,13 @@ class HemorrhageModel(pl.LightningModule):
     def __init__(self, num_steps=1):  # Valeur par défaut pour l'inférence
         super().__init__()
         self.num_steps = num_steps
-        self.model = SwinUNETR(
-            img_size=(96, 96, 96),  
+        self.model = UNet(
+            spatial_dims=3,
             in_channels=1,
             out_channels=6,
-            feature_size=48,  
-            use_checkpoint=True
+            channels=(32, 64, 128, 256, 320, 320),
+            strides=(2, 2, 2, 2, 2),
+            num_res_units=2,
         )
         self.loss_fn = DiceCELoss(include_background=False, to_onehot_y=True, softmax=True)
         self.dice_metric = DiceHelper(
@@ -54,7 +56,7 @@ class HemorrhageModel(pl.LightningModule):
             num_classes=6,
             reduction='none'
         )
-
+    
     def predict_step(self, batch, batch_idx):
         x, y = batch["image"], batch["seg"]
         
@@ -85,8 +87,38 @@ class HemorrhageModel(pl.LightningModule):
             'preds': y_hat.cpu(),  
             'dice': dice_scores,
             'filename': filename,
-            'ground_truth': y.cpu()
+            'ground_truth': y.cpu(),
+            'original_image': x.cpu(),
+            'affine': batch["image"].meta.get("affine", torch.eye(4)),
+            'original_shape': batch["image"].meta.get("spatial_shape", y_hat.shape[2:])
         }
+
+def save_prediction_as_nifti(prediction, filename, save_dir, affine=None):
+    """Sauvegarde une prédiction de segmentation au format NIfTI"""
+    # Appliquer softmax pour obtenir les probabilités
+    pred_probs = torch.softmax(prediction, dim=1)
+    
+    # Convertir en masque de segmentation (argmax pour obtenir la classe avec la plus haute probabilité)
+    pred_mask = torch.argmax(pred_probs, dim=1).squeeze().numpy()
+    
+    # Créer l'affine par défaut si non fourni
+    if affine is None:
+        affine = np.eye(4)
+    elif torch.is_tensor(affine):
+        affine = affine.squeeze().numpy()
+    
+    # Créer l'image NIfTI avec le masque de segmentation
+    nifti_img = nib.Nifti1Image(pred_mask.astype(np.uint8), affine)
+    
+    # Nom du fichier de sortie
+    base_name = filename.replace('.nii.gz', '').replace('.nii', '')
+    output_path = os.path.join(save_dir, f"{base_name}_segmentation.nii.gz")
+    
+    # Sauvegarder
+    nib.save(nifti_img, output_path)
+    print(f"Masque de segmentation sauvegardé : {output_path}")
+    
+    return output_path
 
 def main():
     # Configuration du trainer
@@ -139,6 +171,14 @@ def main():
         
         print(f"\nFile: {batch_result['filename']}")
         print("-" * 30)
+        
+        # Sauvegarder le masque de segmentation au format NIfTI
+        save_prediction_as_nifti(
+            batch_result['preds'], 
+            batch_result['filename'], 
+            SAVE_DIR,
+            batch_result.get('affine', None)
+        )
         
         for class_name, score in batch_result['dice'].items():
             print(f"{class_name}: {score:.4f}")

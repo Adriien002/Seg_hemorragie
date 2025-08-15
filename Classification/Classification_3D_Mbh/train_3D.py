@@ -93,7 +93,7 @@ from tqdm import tqdm
 # === Hyperparams ===
 NUM_CLASSES = 6
 BATCH_SIZE = 32
-EPOCHS = 5
+EPOCHS = 80
 LR = 1e-3
 CLASS_NAMES = ['any', 'epidural', 'intraparenchymal', 'intraventricular', 'subarachnoid', 'subdural']
 DEVICE = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
@@ -230,7 +230,7 @@ def val_epoch(model: torch.nn.Module,
     model.eval()
     val_loss = 0.0
     
-    with torch.inference_mode():  # CORRECTION 8: inference_mode au lieu de no_grad
+    with torch.inference_mode(): 
         for i, batch in enumerate(dataloader):
             X = batch["image"].to(device, non_blocking=True)
             y = batch["label"].to(device, non_blocking=True)
@@ -238,7 +238,7 @@ def val_epoch(model: torch.nn.Module,
             # Forward pass
             y_logits = model(X)
             loss = loss_fn(y_logits, y)
-            val_loss += loss
+            val_loss += loss.item()
             
             # Conversion en probabilités
             y_probs = torch.sigmoid(y_logits)
@@ -330,6 +330,7 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer, epochs):
 
 # === Training Loop ===
 torch.manual_seed(42)
+
 torch.cuda.manual_seed(42)
 
 history = train_model(
