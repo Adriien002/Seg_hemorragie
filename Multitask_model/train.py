@@ -4,7 +4,7 @@ import data.transform as T_mtsk
 
 # Import depuis models/
 from models.architecture import BasicUNetWithClassification
-from models.lightning_module import MultiTaskHemorrhageModule, MultiTaskHemorrhageModule_homeo, MultiTaskHemorrhageModule_gradnorm
+from models.lightning_module import MultiTaskHemorrhageModule, MultiTaskHemorrhageModule_homeo, MultiTaskHemorrhageModule_gradnorm, MultiTaskSoftSharing
 
 import utils
 
@@ -17,6 +17,8 @@ from pytorch_lightning.loggers import WandbLogger
 
 import config
 
+import random
+
 import warnings
 warnings.filterwarnings(
     "ignore",
@@ -25,11 +27,10 @@ warnings.filterwarnings(
 )
 
 warnings.filterwarnings("ignore", message="You are using torch.load with weights_only=False")
-## LOGGER
 config_l = dict(
-    sharing_type="hard",  # "soft" ou "fine_tune"
+    sharing_type="soft",   # "soft" ou "fine_tune"
     model="BasicUNetWithClassification",
-    loss_weighting="homeo",
+    loss_weighting="none",
     dataset_size="small : positifs cases",
     batch_size=2,
     learning_rate=1e-3,
@@ -37,13 +38,14 @@ config_l = dict(
     seed=42
 )
 
+# Génération automatique de tags à partir de config
+tags = [f"{k}:{v}" for k, v in config_l.items() if k in ["sharing_type", "optimizer", "model", "loss_weighting"]]
 
-    
 wandb_logger = WandbLogger(
-project="hemorrhage_multitask_test",
-group="homeo",
-tags=["small_dataset", "hard", "sgd", "unet3d", "noponderation"],
-config=config_l
+    project="hemorrhage_multitask_test",
+    group="noponderation",
+    tags=tags,
+    config=config_l
 )
 
 
@@ -56,7 +58,9 @@ config=config_l
 # val_data = get_multitask_dataset("val")
 
 train_data=dataset.get_balanced_multitask_dataset('train')
+random.shuffle(train_data)  # Mélange des données pour l'entraînement
 val_data=dataset.get_balanced_multitask_dataset('val')
+
 
 # train_data= get_segmentation_data("train") 
 # val_data = get_segmentation_data("val")
@@ -98,9 +102,10 @@ val_loader = DataLoader(
         persistent_workers=True,
        collate_fn=utils.multitask_collate_fn
     )
+
     
     # Modèle
-model = MultiTaskHemorrhageModule_homeo(num_steps=len(train_loader) * config.num_epochs)
+model = MultiTaskSoftSharing(num_steps=len(train_loader) * config.num_epochs)
 print(f"Total number of steps: {len(train_loader) * config.num_epochs}")
     
     # Trainer
@@ -113,10 +118,10 @@ trainer = pl.Trainer(
         #logger=TensorBoardLogger(SAVE_DIR, name="multitask_unet3
         #gradient_clip_val=1.0,  # Gradient clipping pour la stabilité
         log_every_n_steps=50,
-        accumulate_grad_batches=4 ,# Ajout car pour gérer les petites tailles de batch ( dues à limitation mémoire)
+        #accumulate_grad_batches=4 ,# Ajout car pour gérer les petites tailles de batch ( dues à limitation mémoire)
         precision='16-mixed',  # Mixed precision pour accélérer l'entraînement
         callbacks=[
-            EarlyStopping(monitor='val_loss', patience=100, mode='min', verbose=True),
+            #EarlyStopping(monitor='train_loss_epoch', patience=100, mode='min', verbose=True),
             ModelCheckpoint( dirpath=config.SAVE_DIR,filename='best_model',monitor='val_loss', mode='min', save_top_k=2)
         #fast_dev_run=True,  # Pour le debug rapide, à enlever pour l'entraînement complet
         #profiler= simple_profiler.SimpleProfiler()  # Pour le profiling, à enlever si pas besoin
