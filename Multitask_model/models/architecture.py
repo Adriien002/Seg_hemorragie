@@ -133,14 +133,15 @@ class ClsHead(nn.Module):
             nn.Flatten(),
             nn.Linear(in_channels * 4 * 4 * 4, 512),
             nn.LayerNorm(512),
-            nn.LeakyReLU(),
+            nn.LeakyReLU(inplace=True),
             nn.Dropout(0.5),
             nn.Linear(512, 256),
             nn.LayerNorm(256),
-            nn.LeakyReLU(),
+            nn.LeakyReLU(inplace=True),
             nn.Dropout(0.3),
             nn.Linear(256, num_classes)
         )
 
+        
     def forward(self, x):
         return self.head(x)
