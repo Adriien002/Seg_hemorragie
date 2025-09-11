@@ -1,6 +1,7 @@
 
 import os
 import monai.transforms as T
+import config
 
 transforms = T.Compose([
     # Loading transforms
@@ -9,7 +10,7 @@ transforms = T.Compose([
     T.CropForegroundd(keys=['image', 'seg'], source_key='image'), # who cares about the background ?
     T.Orientationd(keys=["image", "seg"], axcodes='RAS'),  # make sure all images are the same orientation
     T.Spacingd(keys=["image", "seg"], pixdim=(1., 1., 1.), mode=['bilinear', 'nearest']), # to isotropic spacing
-    T.SpatialPadd(keys=["image", "seg"], spatial_size=(96, 96, 96)),  # make sure we have at least 96 slices
+    T.SpatialPadd(keys=["image", "seg"], spatial_size=config.spatial_size),  # make sure we have at least 96 slices
     T.ScaleIntensityRanged(keys=["image"], a_min=-10, a_max=140, b_min=0.0, b_max=1.0, clip=True),  # clip images
 
     # Let's crop 2 patches per case using positive negative instead of class by class
@@ -17,9 +18,9 @@ transforms = T.Compose([
        keys=['image', 'seg'],
        image_key='image',
        label_key='seg',
-        pos=5.0,
-        neg=1.0,
-        spatial_size=(96, 96, 96),
+        pos=config.pos_ratio,
+        neg=config.neg_ratio,
+        spatial_size=config.spatial_size,
         num_samples=2
     ),
     # T.RandCropByLabelClassesd(
@@ -45,22 +46,22 @@ transforms = T.Compose([
     T.RandScaleIntensityd(
         keys=['image'],
         factors=0.02,
-        prob=0.5
+        prob=config.prob
     ),
     T.RandShiftIntensityd(
        keys=['image'],
         offsets=0.05,
-        prob=0.5
+        prob=config.prob
     ),
     T.RandRotate90d(
         keys=['image', 'seg'],
-        prob=0.5,
+        prob=config.prob,
         max_k=2,
         spatial_axes=(0, 1)
     ),
     T.RandFlipd(
         keys=['image', 'seg'],
-        prob=0.5,
+        prob=config.prob,
         spatial_axis=[0, 1]
     )
     # T.RandAffined(
@@ -86,6 +87,6 @@ val_transforms = T.Compose([
     T.CropForegroundd(keys=['image', 'seg'], source_key='image'), # who cares about the background ?
     T.Orientationd(keys=["image", "seg"], axcodes='RAS'),  # make sure all images are the same orientation
     T.Spacingd(keys=["image", "seg"], pixdim=(1., 1., 1.), mode=['bilinear', 'nearest']), # to isotropic spacing
-    T.SpatialPadd(keys=["image", "seg"], spatial_size=(96, 96, 96)),  # make sure we have at least 96 slices
+    T.SpatialPadd(keys=["image", "seg"], spatial_size=config.spatial_size),  # make sure we have at least 96 slices
     T.ScaleIntensityRanged(keys=["image"], a_min=-10, a_max=140, b_min=0.0, b_max=1.0, clip=True),  # clip images
 ])
