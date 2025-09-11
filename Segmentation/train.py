@@ -12,6 +12,7 @@ import config
 
 from models.lightning import HemorrhageModel
 from pytorch_lightning.loggers import WandbLogger
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor,EarlyStopping
 import warnings
 warnings.filterwarnings(
     "ignore",
@@ -47,7 +48,7 @@ wandb_logger = WandbLogger(
 
 
 
-num_epochs = 1000
+
     # Load data (same as original)
 train_files = dataset.get_data_files(f"{config.DATASET_DIR}/train/img", f"{config.DATASET_DIR}/train/seg")
 val_files = dataset.get_data_files(f"{config.DATASET_DIR}/val/img", f"{config.DATASET_DIR}/val/seg")
@@ -60,11 +61,7 @@ test_dataset = PersistentDataset(
         cache_dir=os.path.join(config.SAVE_DIR, "cache_test")  
     )
     
-test_loader = DataLoader(
-        test_dataset, 
-        batch_size=1, 
-        shuffle=False,  
-        num_workers=4  )
+test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False,  num_workers=4  )
 
 train_dataset = PersistentDataset(
         train_files,
@@ -78,23 +75,24 @@ val_dataset = PersistentDataset(
         cache_dir=os.path.join(config.SAVE_DIR, "cache_val")
     )
 
-train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True, num_workers=8)
+train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=8)
 val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=8)
 
     # Initialize model with checkpoint if available
-model = HemorrhageModel(num_steps=len(train_loader) * num_epochs)
-print(f"Total number of steps : {len(train_loader) * num_epochs}")
+model = HemorrhageModel(num_steps=len(train_loader) * config.num_epochs)
+print(f"Total number of steps : {len(train_loader) * config.num_epochs}")
 
     # Configure trainer with progress bar and checkpointing
 trainer = pl.Trainer(
-        max_epochs=num_epochs,
+        max_epochs=config.num_epochs,
         #check_val_every_n_epoch=5,
         accelerator="auto",
         devices=[0],
         default_root_dir=config.SAVE_DIR,
         logger= wandb_logger, # Dossier où sont stockés les logs
         #accumulate_grad_batches=4  # Accumulate gradients over 4 batches
-        
+        callbacks=[ ModelCheckpoint( dirpath=config.SAVE_DIR,filename='best_model',monitor=config.monitor, mode=config.mode, save_top_k=config.save_top_k),
+                   EarlyStopping(monitor=config.monitor, patience=config.patience, mode=config.mode, verbose=True)]
     )
 
     # Start training
