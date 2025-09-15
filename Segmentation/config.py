@@ -12,6 +12,7 @@ CONFIG = {
         "num_epochs": 1000,
     },
     "model": {
+        
         "spatial_dims": 3,
         "in_channels": 1,
         "out_channels": 6,

@@ -1,25 +1,25 @@
 
-from monai.networks.nets import UNet
+
 from monai.inferers import sliding_window_inference
 from monai.losses import DiceCELoss
 from monai.metrics import DiceHelper
 import pytorch_lightning as pl
 from torch.optim import Adam, SGD
 from transformers import get_linear_schedule_with_warmup
-
+import config
+import os
+import monai.networks.nets as monai_nets
 
 class HemorrhageModel(pl.LightningModule):
     def __init__(self, num_steps):
         super().__init__()
+        self.config=config.CONFIG
+        
+        
         self.num_steps = num_steps
-        self.model = UNet(
-            spatial_dims=3,
-            in_channels=1,
-            out_channels=6,
-            channels=(32, 64, 128, 256, 320, 320),
-            strides=(2, 2, 2, 2, 2),
-            num_res_units=2,
-        )
+        self.model = monai_nets.UNet(**config["model"])
+        
+        
         # self.model = BasicUNetWithClassification(
         #     spatial_dims=3,
         #     in_channels=1,
@@ -39,6 +39,15 @@ class HemorrhageModel(pl.LightningModule):
         #     softmax=True,
         #     gamma=2.0,
         #     )
+        
+        
+        # self.model = SwinUNETR(
+        # img_size=(96, 96, 96),  
+        # in_channels=1,
+        # out_channels=4,
+        # feature_size=48,  # Réduire à 24 si mémoire insuffisante
+        # use_checkpoint=True  # Pour économiser la mémoire
+        # )
         self.loss_fn = DiceCELoss(include_background=False, to_onehot_y=True, softmax=True) # don't need to weight the dice ce loss
         self.dice_metric = DiceHelper(include_background=False,
                                       softmax=True,
@@ -74,13 +83,49 @@ class HemorrhageModel(pl.LightningModule):
         y_labels = y.unique().long().tolist()[1:]
         scores = {label: scores[0][label - 1].item() for label in y_labels}
 
-        metrics = {f'dice_c{label}': score for label, score in scores.items()}
+        metrics = {f'val_dice_c{label}': score for label, score in scores.items()}
         metrics['val_loss'] = loss
 
         self.log_dict(metrics, on_epoch=True, prog_bar=True)
 
         return loss
     
+    def predict_step(self, batch, batch_idx):
+        x, y = batch["image"], batch["seg"]
+        
+        # Inférence avec sliding window
+        y_hat = sliding_window_inference(
+            x,
+            roi_size=(96, 96, 96),
+            sw_batch_size=2,
+            predictor=self.model
+        )
+        
+        # Calcul des scores Dice
+        scores, _ = self.dice_metric(y_hat, y)
+        
+        # Extraction des scores par classe
+        dice_scores = {}
+        for class_idx in range(5):  # Classes 1-5
+            dice_scores[f"dice_c{class_idx+1}"] = scores[0, class_idx].item()
+        
+        if isinstance(batch["image"].meta["filename_or_obj"], list):
+            full_path = batch["image"].meta["filename_or_obj"][0]
+        else:
+            full_path = batch["image"].meta["filename_or_obj"]
+        
+        filename = os.path.basename(full_path)
+        
+        return {
+            'preds': y_hat.cpu(),  
+            'dice': dice_scores,
+            'filename': filename,
+            'ground_truth': y.cpu(),
+            'original_image': x.cpu(),
+            'affine': batch["image"].meta.get("affine", torch.eye(4)),
+            'original_shape': batch["image"].meta.get("spatial_shape", y_hat.shape[2:])
+        }
+        
     def test_step(self, batch, batch_idx):
         x, y = batch["image"], batch["seg"]
 
@@ -94,10 +139,10 @@ class HemorrhageModel(pl.LightningModule):
 
         scores, _ = self.dice_metric(y_hat, y)
 
-        y_labels = y.unique().long().tolist()[1:]
-        scores = {label: scores[0][label - 1].item() for label in y_labels}
+        y_labels = y.unique().long().tolist()[1:] # exclude background
+        scores = {label: scores[0][label - 1].item() for label in y_labels} # maps label to its dice score
 
-        metrics = {f'dice_c{label}': score for label, score in scores.items()}
+        metrics = {f'test_dice_c{label}': score for label, score in scores.items()}
         metrics['test_loss'] = loss
 
         self.log_dict(metrics, on_epoch=True, prog_bar=True)
@@ -107,10 +152,35 @@ class HemorrhageModel(pl.LightningModule):
         
     def configure_optimizers(self):
 
-        optimizer = SGD(self.parameters(), lr=1e-3, momentum=0.99, nesterov=True, weight_decay=0.00003)
-        scheduler = get_linear_schedule_with_warmup(optimizer,
-                                                    num_warmup_steps=0,
-                                                    num_training_steps=self.num_steps)
+        cfg = self.config
+
+    # Choix de l'optimizer
+        if cfg["training"]["optimizer"] == "adam":
+            optimizer = Adam(
+                self.parameters(),
+                lr=cfg["training"]["learning_rate"],
+                weight_decay=cfg["training"]["weight_decay"]
+            )
+        elif cfg["training"]["optimizer"] == "sgd":
+            optimizer = SGD(
+                self.parameters(),
+                lr=cfg["training"]["learning_rate"],
+                momentum=cfg["training"]["momentum"],
+                nesterov=True,
+                weight_decay=cfg["training"]["weight_decay"]
+            )
+        else:
+            raise ValueError(f"Optimizer {cfg['training']['optimizer']} not supported.")
+
+        # Scheduler
+        if cfg["scheduler"]["type"] == "linear_warmup":
+            scheduler = get_linear_schedule_with_warmup(
+                optimizer,
+                num_warmup_steps=cfg["scheduler"]["num_warmup_steps"],
+                num_training_steps=self.num_steps
+            )
+            
+            
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
