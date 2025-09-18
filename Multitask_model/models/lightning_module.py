@@ -879,8 +879,6 @@ class MultiTaskSoftSharing(pl.LightningModule):
             x_cls, y_cls = batch["classification"]["image"], batch["classification"]["label"]
             _, cls_logits = self.forward(x_cls)
             y_cls = y_cls.as_tensor().float()
-            if y_cls.ndim == 2 and y_cls.shape[0] == 1:  # [1,C] -> [C]
-                y_cls = y_cls.squeeze(0)
             loss_cls = self.cls_loss_fn(cls_logits, y_cls)
             total_loss += self.cls_weight * loss_cls
             batch_size += x_cls.shape[0]
@@ -906,12 +904,13 @@ class MultiTaskSoftSharing(pl.LightningModule):
             y_hat_cls = y_hat_cls.as_tensor()
             y_cls = y_cls.as_tensor()
             
-            if y_cls.ndim == 3 and y_cls.shape[1] == 1:      # [B,1,C] -> [B,C]
-                y_cls = y_cls.squeeze(1)
-            if y_cls.ndim == 2 and y_cls.shape[-1] == 1:     # [B,C,1] -> [B,C] (si jamais)
-                y_cls = y_cls.squeeze(-1)
-            y_cls = y_cls.float()
+            # y_cls = y_cls.float()
+            # if y_cls.ndim == 1:   # e.g. [C]
+            #     y_cls = y_cls.unsqueeze(0)   # -> [1, C]
+
             loss_cls = self.cls_loss_fn(y_hat_cls, y_cls)
+            
+            
 
             y_cls_pred = torch.sigmoid(y_hat_cls)
             self.cls_auc.update(y_cls_pred, y_cls.int())
@@ -943,7 +942,7 @@ class MultiTaskSoftSharing(pl.LightningModule):
             # Log dice par classe
             y_labels = y_seg.unique().long().tolist()[1:]
             scores = {label: scores[0][label - 1].item() for label in y_labels}
-            metrics = {f'val_dice_c{label}': score for label, score in scores.items()}
+            metrics = {f'dice_c{label}': score for label, score in scores.items()}
             self.log_dict(metrics, on_epoch=True, prog_bar=True)
 
             total_loss += self.seg_weight * loss_seg
