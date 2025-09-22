@@ -55,15 +55,16 @@ def save_prediction_as_nifti(prediction, filename, save_dir, affine=None):
 # Load data (same as original)
 
 
-test_files = dataset.get_data_files(f"{config.DATASET_DIR}/test/img", f"{config.DATASET_DIR}/test/seg")
+predict_files = dataset.get_data_files(f"{config['dataset']['dataset_dir']}/val/img",
+                                       f"{config['dataset']['dataset_dir']}/val/seg") #same as val
     
-test_dataset = PersistentDataset(
-        test_files,
-        transform=T_seg.val_transforms,
-        cache_dir=os.path.join(config.SAVE_DIR, "cache_test")  
+predict_dataset = PersistentDataset(
+        predict_files,
+        transform=T_seg.get_val_transforms(config),
+        cache_dir=os.path.join(config['dataset']['save_dir'], "cache_test")  
     )
     
-test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False,  num_workers=4  )
+predict_loader = DataLoader(predict_dataset, batch_size=1, shuffle=False,  num_workers=4  )
 
 
 
@@ -71,23 +72,24 @@ test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False,  num_workers
 #Configure trainer (no need for checkpoint callback and logger here)
 
 trainer = pl.Trainer(
-        max_epochs=config.num_epochs,
+        max_epochs=config['training']['num_epochs'],
         #check_val_every_n_epoch=5,
         accelerator="auto",
         devices=[0],
-        default_root_dir=config.SAVE_DIR,
+        default_root_dir=config['dataset']['save_dir'],
+        #callbacks=callbacks,
         
     )
 
-print(f"Chargement du modèle depuis : {config.CHECKPOINT_PATH}")
+print(f"Chargement du modèle depuis : {config}")
 model = HemorrhageModel.load_from_checkpoint(
-        config.CHECKPOINT_PATH,
+        config['CHECKPOINT_PATH'],
         num_steps=1  # Pas important pour l'inférence
     )
     # Start training
  # Lancement de l'inférence
 print("Inference begining")
-predictions = trainer.predict(model, dataloaders=test_loader)
+predictions = trainer.predict(model, dataloaders=predict_loader)
     
     # Traitement des résultats
 all_dice_scores = {f"dice_c{i+1}": [] for i in range(5)}
@@ -108,34 +110,33 @@ for i, batch_result in enumerate(predictions):
         save_prediction_as_nifti(
             batch_result['preds'], 
             batch_result['filename'], 
-            config.SAVE_DIR,
+            os.path.join(config['dataset']['save_dir'], "predictions"),
             batch_result.get('affine', None)
         )
         
-        for class_name, score in batch_result['dice'].items():
-            print(f"{class_name}: {score:.4f}")
-            if not np.isnan(score):
-                all_dice_scores[class_name].append(score)
+        # for class_name, score in batch_result['dice'].items():
+        #     print(f"{class_name}: {score:.4f}")
+        #     if not np.isnan(score):
+        #         all_dice_scores[class_name].append(score)
     
-    # Calcul des moyennes
-print("\n" + "="*50)
-print("Mean per classe")
-print("="*50)
+#     # Calcul des moyennes
+# print("\n" + "="*50)
+# print("Mean per classe")
+# print("="*50)
     
-overall_mean = []
-for class_name, scores in all_dice_scores.items():
-        valid_scores = [score for score in scores if not np.isnan(score)]
-        if valid_scores:  # If score not nan
-            mean_score = np.mean(scores)
-            std_score = np.std(scores)
-            print(f"{class_name}: {mean_score:.4f} ± {std_score:.4f} (n={len(scores)})")
-            overall_mean.append(mean_score)
-        else:
-            print(f"{class_name}: No prediction")
+# overall_mean = []
+# for class_name, scores in all_dice_scores.items():
+#         valid_scores = [score for score in scores if not np.isnan(score)]
+#         if valid_scores:  # If score not nan
+#             mean_score = np.mean(scores)
+#             std_score = np.std(scores)
+#             print(f"{class_name}: {mean_score:.4f} ± {std_score:.4f} (n={len(scores)})")
+#             overall_mean.append(mean_score)
+#         else:
+#             print(f"{class_name}: No prediction")
     
-if overall_mean:
-        print(f"\n Mean {np.mean(overall_mean):.4f}")
+# if overall_mean:
+#         print(f"\n Mean {np.mean(overall_mean):.4f}")
     
-print(f"\nSaving results in  : {config.SAVE_DIR}")
-
+# print(f"\nSaving results in  : {config.SAVE_DIR}")
 

@@ -8,7 +8,7 @@ from pytorch_lightning.loggers import WandbLogger
 import data.dataset as dataset
 import data.transform as T_seg
 
-import config
+import config as cfg
 import wandb
 from models.lightning import HemorrhageModel
 from pytorch_lightning.loggers import WandbLogger
@@ -22,35 +22,18 @@ warnings.filterwarnings(
 
 warnings.filterwarnings("ignore", message="You are using torch.load with weights_only=False")
 
-#initialisaiton w&b
-wandb.init(project="segmentation_sweep", config=config)
-cfg = wandb.config
+    # Logger W&B
+    # ---------------------------
+wandb_logger = WandbLogger(project="segmentation_MBH", config=cfg)
 
-#Logger
-wandb_logger = WandbLogger(project="segmentation_sweep",config=config)
-
-
-
-
-
-
-# Load data (same as original)
+    # ---------------------------
+    # Load data
+    # ---------------------------
 train_files = dataset.get_data_files(f"{cfg['dataset']['dataset_dir']}/train/img",
-                                     f"{cfg['dataset']['dataset_dir']}/train/seg")
+                                         f"{cfg['dataset']['dataset_dir']}/train/seg")
 val_files = dataset.get_data_files(f"{cfg['dataset']['dataset_dir']}/val/img",
-                                   f"{cfg['dataset']['dataset_dir']}/val/seg")
-test_files = dataset.get_data_files(f"{cfg['dataset']['dataset_dir']}/test/img",
-                                    f"{cfg['dataset']['dataset_dir']}/test/seg"))
+                                       f"{cfg['dataset']['dataset_dir']}/val/seg")
     
-    
-test_dataset = PersistentDataset(
-        test_files,
-        transform=T_seg.val_transforms,
-        cache_dir=os.path.join(cfg['dataset']['save_dir'], "cache_test")  
-    )
-    
-test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False,  num_workers=4  )
-
 train_dataset = PersistentDataset(
         train_files,
         transform=T_seg.get_train_transforms(cfg),
@@ -64,36 +47,117 @@ val_dataset = PersistentDataset(
     )
 
 train_loader = DataLoader(train_dataset, batch_size=cfg['training']['batch_size'], shuffle=True, num_workers=8)
-val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=8)
+val_loader = DataLoader(val_dataset, batch_size=cfg['training']['batch_size'], shuffle=False, num_workers=8)
 
-# Initialize model with checkpoint if available
-model = HemorrhageModel(num_steps=len(train_loader) * cfg['training']["num_epochs"])
-print(f"Total number of steps : {len(train_loader) * cfg['training']["num_epochs"]}")
+    # ---------------------------
+    # Model
+    # ---------------------------
+num_steps = len(train_loader) * cfg['training']['num_epochs']
+model = HemorrhageModel(num_steps=num_steps, cfg=cfg)  # tu passes cfg pour optimizer/scheduler dynamiques
 
-# Callbacks
+    # ---------------------------
+    # Callbacks
+    # ---------------------------
 callbacks = [
-        EarlyStopping(monitor="val_loss", patience=cfg["callbacks"]["patience"])
+        EarlyStopping(monitor=cfg['callbacks']['monitor'], patience=cfg['callbacks']['patience']),
+        ModelCheckpoint(
+            monitor=cfg['callbacks']['monitor'],
+            mode=cfg['callbacks']['mode'],
+            save_top_k=cfg['callbacks']['save_top_k'],
+            dirpath=os.path.join(cfg['dataset']['save_dir'], "checkpoints"),
+            filename="best_model"
+        ),
+        LearningRateMonitor(logging_interval='step')
     ]
 
-
-
-# Configure trainer with progress bar and checkpointing
+    # ---------------------------
+    # Trainer
+    # ---------------------------
 trainer = pl.Trainer(
         max_epochs=cfg['training']['num_epochs'],
-        #check_val_every_n_epoch=5,
         accelerator="auto",
-        devices=[0],
+        devices="auto",
         default_root_dir=cfg['dataset']['save_dir'],
-        logger= wandb_logger, # Dossier où sont stockés les logs
-        #accumulate_grad_batches=4  # Accumulate gradients over 4 batches
+        logger=wandb_logger,
         callbacks=callbacks,
-        
+        gradient_clip_val=1.0
     )
 
-    # Start training
+    # ---------------------------
+    # Train
+    # ---------------------------
 trainer.fit(model, train_loader, val_loader)
-    
-    # #Test
-    # print("Starting test phase...")
-    # trainer.test(model, dataloaders=test_loader)
 
+
+
+
+
+
+
+# def train_model(cfg):
+#     # ---------------------------
+#     # Logger W&B
+#     # ---------------------------
+#     wandb_logger = WandbLogger(project="segmentation_sweep", config=cfg)
+
+#     # ---------------------------
+#     # Load data
+#     # ---------------------------
+#     train_files = dataset.get_data_files(f"{cfg['dataset']['dataset_dir']}/train/img",
+#                                          f"{cfg['dataset']['dataset_dir']}/train/seg")
+#     val_files = dataset.get_data_files(f"{cfg['dataset']['dataset_dir']}/val/img",
+#                                        f"{cfg['dataset']['dataset_dir']}/val/seg")
+    
+#     train_dataset = PersistentDataset(
+#         train_files,
+#         transform=T_seg.get_train_transforms(cfg),
+#         cache_dir=os.path.join(cfg['dataset']['save_dir'], "cache_train")
+#     )
+
+#     val_dataset = PersistentDataset(
+#         val_files,
+#         transform=T_seg.get_val_transforms(cfg),
+#         cache_dir=os.path.join(cfg['dataset']['save_dir'], "cache_val")
+#     )
+
+#     train_loader = DataLoader(train_dataset, batch_size=cfg['training']['batch_size'], shuffle=True, num_workers=8)
+#     val_loader = DataLoader(val_dataset, batch_size=cfg['training']['batch_size'], shuffle=False, num_workers=8)
+
+#     # ---------------------------
+#     # Model
+#     # ---------------------------
+#     num_steps = len(train_loader) * cfg['training']['num_epochs']
+#     model = HemorrhageModel(num_steps=num_steps, cfg=cfg)  # tu passes cfg pour optimizer/scheduler dynamiques
+
+#     # ---------------------------
+#     # Callbacks
+#     # ---------------------------
+#     callbacks = [
+#         EarlyStopping(monitor=cfg['callbacks']['monitor'], patience=cfg['callbacks']['patience']),
+#         ModelCheckpoint(
+#             monitor=cfg['callbacks']['monitor'],
+#             mode=cfg['callbacks']['mode'],
+#             save_top_k=cfg['callbacks']['save_top_k'],
+#             dirpath=cfg['dataset']['save_dir'],
+#             filename="best_model"
+#         ),
+#         LearningRateMonitor(logging_interval='step')
+#     ]
+
+#     # ---------------------------
+#     # Trainer
+#     # ---------------------------
+#     trainer = pl.Trainer(
+#         max_epochs=cfg['training']['num_epochs'],
+#         accelerator="auto",
+#         devices="auto",
+#         default_root_dir=cfg['dataset']['save_dir'],
+#         logger=wandb_logger,
+#         callbacks=callbacks,
+#         gradient_clip_val=1.0
+#     )
+
+#     # ---------------------------
+#     # Train
+#     # ---------------------------
+#     trainer.fit(model, train_loader, val_loader)
