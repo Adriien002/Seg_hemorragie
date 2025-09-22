@@ -21,7 +21,7 @@ warnings.filterwarnings(
 )
 
 warnings.filterwarnings("ignore", message="You are using torch.load with weights_only=False")
-
+cfg=cfg.CONFIG
     # Logger W&B
     # ---------------------------
 wandb_logger = WandbLogger(project="segmentation_MBH", config=cfg)
@@ -47,13 +47,13 @@ val_dataset = PersistentDataset(
     )
 
 train_loader = DataLoader(train_dataset, batch_size=cfg['training']['batch_size'], shuffle=True, num_workers=8)
-val_loader = DataLoader(val_dataset, batch_size=cfg['training']['batch_size'], shuffle=False, num_workers=8)
+val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=8)
 
     # ---------------------------
     # Model
     # ---------------------------
 num_steps = len(train_loader) * cfg['training']['num_epochs']
-model = HemorrhageModel(num_steps=num_steps, cfg=cfg)  # tu passes cfg pour optimizer/scheduler dynamiques
+model = HemorrhageModel(num_steps=num_steps) # cfg is global
 
     # ---------------------------
     # Callbacks
@@ -67,7 +67,7 @@ callbacks = [
             dirpath=os.path.join(cfg['dataset']['save_dir'], "checkpoints"),
             filename="best_model"
         ),
-        LearningRateMonitor(logging_interval='step')
+        #LearningRateMonitor(logging_interval='step')
     ]
 
     # ---------------------------

@@ -9,6 +9,7 @@ from transformers import get_linear_schedule_with_warmup
 import config
 import os
 import monai.networks.nets as monai_nets
+import torch
 
 class HemorrhageModel(pl.LightningModule):
     def __init__(self, num_steps):
@@ -17,7 +18,7 @@ class HemorrhageModel(pl.LightningModule):
         
         
         self.num_steps = num_steps
-        self.model = monai_nets.UNet(**config["model"])
+        self.model = monai_nets.UNet(**self.config["model"])
         
         
         # self.model = BasicUNetWithClassification(

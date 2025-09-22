@@ -3,20 +3,27 @@ import os
 import monai.networks.nets as monai_nets
 
 CONFIG = {
+    
     "dataset": {
         "dataset_dir": "/home/tibia/Projet_Hemorragie/Split_MBH_V2",
         "save_dir": "/home/tibia/Projet_Hemorragie/MBH_seg_v2_test_1",
     },
+    
     "training": {
         "batch_size": 2,
         "num_epochs": 1000,
-        "optimizer": "SGD",  # AdamW or SGD
+        "optimizer": "sgd",  # AdamW or SGD
         "learning_rate": 1e-3,
         "weight_decay": 1e-5,
         "momentum": 0.9,
     },
+    
+    "scheduler": {
+    "type": "linear_warmup",
+    "num_warmup_steps": 10  
+    },
+    
     "model": {
-        
         "spatial_dims": 3,
         "in_channels": 1,
         "out_channels": 6,
@@ -24,6 +31,7 @@ CONFIG = {
         "strides": (2, 2, 2, 2, 2),
         "num_res_units": 2,
     },
+    
     "augmentation": {
         "spatial_size": (96, 96, 96),
         "pos_ratio": 5.0,
@@ -35,5 +43,8 @@ CONFIG = {
         "mode": "min",
         "save_top_k": 1,
         "patience": 50,
-    }
+    },
+    
+    "CHECKPOINT_PATH": "/home/tibia/Projet_Hemorragie/MBH_seg_test/checkpoints/best_model.ckpt"
+
 }
