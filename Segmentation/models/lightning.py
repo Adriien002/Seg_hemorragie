@@ -10,6 +10,7 @@ import config
 import os
 import monai.networks.nets as monai_nets
 import torch
+import numpy as np
 
 class HemorrhageModel(pl.LightningModule):
     def __init__(self, num_steps):
@@ -19,36 +20,6 @@ class HemorrhageModel(pl.LightningModule):
         
         self.num_steps = num_steps
         self.model = monai_nets.UNet(**self.config["model"])
-        
-        
-        # self.model = BasicUNetWithClassification(
-        #     spatial_dims=3,
-        #     in_channels=1,
-        #     out_channels=6,  # pour segmentation
-        #     num_cls_classes=6,  # pour classification
-        #     features=(32, 32, 64, 128, 256, 32),
-        #     act=("LeakyReLU", {"negative_slope": 0.1, "inplace": True}),
-        #     norm=("instance", {"affine": True}),
-        #     bias=True,
-        #     dropout=0.0,
-        #     upsample="deconv"
-        # )
-        
-        # self.loss_fn = DiceFocalLoss(
-        #     include_background=False,
-        #     to_onehot_y=True,
-        #     softmax=True,
-        #     gamma=2.0,
-        #     )
-        
-        
-        # self.model = SwinUNETR(
-        # img_size=(96, 96, 96),  
-        # in_channels=1,
-        # out_channels=4,
-        # feature_size=48,  # Réduire à 24 si mémoire insuffisante
-        # use_checkpoint=True  # Pour économiser la mémoire
-        # )
         self.loss_fn = DiceCELoss(include_background=False, to_onehot_y=True, softmax=True) # don't need to weight the dice ce loss
         self.dice_metric = DiceHelper(include_background=False,
                                       softmax=True,
@@ -91,6 +62,7 @@ class HemorrhageModel(pl.LightningModule):
 
         return loss
     
+    
     def predict_step(self, batch, batch_idx):
         x, y = batch["image"], batch["seg"]
         
@@ -116,6 +88,7 @@ class HemorrhageModel(pl.LightningModule):
             full_path = batch["image"].meta["filename_or_obj"]
         
         filename = os.path.basename(full_path)
+         
         
         return {
             'preds': y_hat.cpu(),  
@@ -124,8 +97,10 @@ class HemorrhageModel(pl.LightningModule):
             'ground_truth': y.cpu(),
             'original_image': x.cpu(),
             'affine': batch["image"].meta.get("affine", torch.eye(4)),
-            'original_shape': batch["image"].meta.get("spatial_shape", y_hat.shape[2:])
+            'original_shape': batch["image"].meta.get("spatial_shape", y_hat.shape[2:]),
+            'image_meta_dict': batch["image"].meta                                        
         }
+  
         
     def test_step(self, batch, batch_idx):
         x, y = batch["image"], batch["seg"]
