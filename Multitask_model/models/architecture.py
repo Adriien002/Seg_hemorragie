@@ -35,7 +35,7 @@ class BasicUNetWithClassification(nn.Module):
         self.down_2 = Down(spatial_dims, fea[1], fea[2], act, norm, bias, dropout)
         self.down_3 = Down(spatial_dims, fea[2], fea[3], act, norm, bias, dropout)
         self.down_4 = Down(spatial_dims, fea[3], fea[4], act, norm, bias, dropout)
-
+        
         # Decoder
         self.upcat_4 = UpCat(spatial_dims, fea[4], fea[3], fea[3], act, norm, bias, dropout, upsample)
         self.upcat_3 = UpCat(spatial_dims, fea[3], fea[2], fea[2], act, norm, bias, dropout, upsample)
@@ -59,25 +59,81 @@ class BasicUNetWithClassification(nn.Module):
             nn.Linear(256, num_cls_classes)
         )
 
-    def forward(self, x: torch.Tensor):
-        # Encoder
-        x0 = self.conv_0(x)
-        x1 = self.down_1(x0)
-        x2 = self.down_2(x1)
-        x3 = self.down_3(x2)
-        x4 = self.down_4(x3)
+    def forward(self, x: torch.Tensor, task: str = "segmentation"):
+        if task == "segmentation":
+            # Ton code actuel pour la segmentation
+            x0 = self.conv_0(x)
+            x1 = self.down_1(x0)
+            x2 = self.down_2(x1)
+            x3 = self.down_3(x2)
+            x4 = self.down_4(x3)
+            
+            u4 = self.upcat_4(x4, x3)
+            u3 = self.upcat_3(u4, x2)
+            u2 = self.upcat_2(u3, x1)
+            u1 = self.upcat_1(u2, x0)
+            seg_logits = self.final_conv(u1)
+            
+            return seg_logits, None
 
-        # Decoder (segmentation)
-        u4 = self.upcat_4(x4, x3)
-        u3 = self.upcat_3(u4, x2)
-        u2 = self.upcat_2(u3, x1)
-        u1 = self.upcat_1(u2, x0)
-        seg_logits = self.final_conv(u1)
+        elif task == "classification":
+        # Gestion des multi-patches
+            if x.dim() == 6:  # [B, N, C, H, W, D]
+                batch_size, num_patches = x.shape[0], x.shape[1]
+                
+                # RESHAPE CRITIQUE: [B, N, C, H, W, D] -> [B*N, C, H, W, D]
+                x_reshaped = x.view(-1, *x.shape[2:])  # [B*N, C, H, W, D]
+                
+                # Forward sur tous les patches
+                x0 = self.conv_0(x_reshaped)
+                x1 = self.down_1(x0)
+                x2 = self.down_2(x1)
+                x3 = self.down_3(x2)
+                x4 = self.down_4(x3)  # [B*N, features, H', W', D']
+                
+                # Reshape back: [B*N, C, H, W, D] -> [B, N, C, H, W, D]
+                x4 = x4.view(batch_size, num_patches, *x4.shape[1:])
+                
+                # Agrégation: [B, N, C, H, W, D] -> [B, C, H, W, D]
+                aggregated = torch.max(x4, dim=1)[0]  # Max pooling sur les patches
+                
+                # Classification
+                cls_logits = self.cls_head(aggregated)
+                return None, cls_logits
+            
+        else:  # Single patch [B, C, H, W, D]
+            x0 = self.conv_0(x)
+            x1 = self.down_1(x0)
+            x2 = self.down_2(x1)
+            x3 = self.down_3(x2)
+            x4 = self.down_4(x3)
+            cls_logits = self.cls_head(x4)
+            return None, cls_logits
+                
+      
+        
+    
+    # def forward(self, x: torch.Tensor):
+    #     # Encoder
+    #     x0 = self.conv_0(x)
+    #     x1 = self.down_1(x0)
+    #     x2 = self.down_2(x1)
+    #     x3 = self.down_3(x2)
+    #     x4 = self.down_4(x3)
 
-        # Classification
-        cls_logits = self.cls_head(x4)  # x4 est le bottleneck
+    #     # Decoder (segmentation)
+    #     u4 = self.upcat_4(x4, x3)
+    #     u3 = self.upcat_3(u4, x2)
+    #     u2 = self.upcat_2(u3, x1)
+    #     u1 = self.upcat_1(u2, x0)
+    #     seg_logits = self.final_conv(u1)
 
-        return seg_logits  , cls_logits
+    #     # Classification
+    #     cls_logits = self.cls_head(x4)  # x4 est le bottleneck
+
+    #     return seg_logits  , cls_logits
+
+
 
 
 class BasicUNetEncoder(nn.Module):
