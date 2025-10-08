@@ -46,3 +46,59 @@ def calculate_pos_weights(csv_path, label_cols):
             pos_weight = 1.0  # Default weight if no positive samples
         pos_weights.append(pos_weight)
     return torch.tensor(pos_weights, dtype=torch.float)
+
+import torch
+import itertools
+
+def extract_sliding_window_patches(image_tensor, label, roi_size=(96, 96, 96), overlap=0.25):
+    """
+    Extrait patches avec sliding window.
+    
+    Args:
+        image_tensor: Tensor [C, H, W, D]
+        label: Label de classification
+        roi_size: Taille des patches
+        overlap: Pourcentage de chevauchement (0.0 à 0.99)
+    
+    Returns:
+        Liste de dicts avec 'image', 'label', 'task'
+    """
+    C, H, W, D = image_tensor.shape
+    
+    # Calcule le stride
+    stride = tuple(int(r * (1 - overlap)) for r in roi_size)
+   
+    
+    # # Génère les positions de départ pour chaque dimension
+    def get_starts(dim_size, roi_dim, stride_dim):
+        starts = list(range(0, dim_size - roi_dim + 1, stride_dim))
+        # Assure la couverture complète
+        if starts[-1] + roi_dim < dim_size:
+            starts.append(dim_size - roi_dim)
+        return starts
+    
+    h_starts = get_starts(H, roi_size[0], stride[0])
+    w_starts = get_starts(W, roi_size[1], stride[1])
+    d_starts = get_starts(D, roi_size[2], stride[2])
+
+    
+    patches = []
+    for h, w, d in itertools.product(h_starts, w_starts, d_starts):
+        patch = image_tensor[
+            :,
+            h:h + roi_size[0],
+            w:w + roi_size[1],
+            d:d + roi_size[2]
+        ]
+        
+        patches.append({
+            "image": patch,
+            "label": label,
+            "task": "classification"
+        })
+        
+         
+
+    
+
+    return patches

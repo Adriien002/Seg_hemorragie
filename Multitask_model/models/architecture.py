@@ -101,14 +101,14 @@ class BasicUNetWithClassification(nn.Module):
                 cls_logits = self.cls_head(aggregated)
                 return None, cls_logits
             
-        else:  # Single patch [B, C, H, W, D]
-            x0 = self.conv_0(x)
-            x1 = self.down_1(x0)
-            x2 = self.down_2(x1)
-            x3 = self.down_3(x2)
-            x4 = self.down_4(x3)
-            cls_logits = self.cls_head(x4)
-            return None, cls_logits
+            else:  # Single patch [B, C, H, W, D]
+                x0 = self.conv_0(x)
+                x1 = self.down_1(x0)
+                x2 = self.down_2(x1)
+                x3 = self.down_3(x2)
+                x4 = self.down_4(x3)
+                cls_logits = self.cls_head(x4)
+                return None, cls_logits
                 
       
         

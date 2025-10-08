@@ -13,6 +13,21 @@ import torch.nn as nn
 
 
 
+import models.architecture as Arch
+import pytorch_lightning as pl
+from monai.inferers import sliding_window_inference
+from monai.losses import DiceCELoss
+from monai.metrics import DiceHelper
+from torch.optim import SGD, Adam
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torchmetrics.classification import MultilabelRecall, MultilabelAUROC, MultilabelPrecision
+from transformers import get_linear_schedule_with_warmup
+import torch
+import config
+import torch.nn as nn
+
+
+
 class MultiTaskHemorrhageModule(pl.LightningModule):
     def __init__(self, num_steps: int, seg_weight: float = 1.0, cls_weight: float = 0.5):
         super().__init__()
@@ -59,8 +74,8 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
         return torch.nn.BCEWithLogitsLoss(pos_weight=pos_weights) 
     
       
-    def forward(self, x):
-        return self.model(x)
+    def forward(self, x,task="segmentation"):
+        return self.model(x,task=task)
         
     def training_step(self, batch, batch_idx):
         total_loss = 0.0
@@ -72,7 +87,7 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
             y_cls = batch["classification"]["label"]
 
         # Forward pass
-            _ ,cls_logits = self.model(x_cls)
+            _ ,cls_logits = self.model(x_cls, task="classification")
 
         # Loss classification
             loss_cls = self.cls_loss_fn(cls_logits, y_cls)
@@ -88,7 +103,7 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
 
         # Forward pass
           
-            seg_logits,_ = self.model(x_seg)
+            seg_logits,_ = self.model(x_seg, task="segmentation")
 
         # Loss segmentation
             loss_seg = self.seg_loss_fn(seg_logits, y_seg)
@@ -128,7 +143,7 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
                 x_cls = batch["classification"]["image"]
                 y_cls = batch["classification"]["label"]
                 
-                _ , y_hat_cls = self.model(x_cls)
+                _ , y_hat_cls = self.model(x_cls, task="classification")
                 loss_cls = self.cls_loss_fn(y_hat_cls, y_cls)
                 y_cls_pred = torch.sigmoid(y_hat_cls).as_tensor()
                 self.cls_auc.update(y_cls_pred, y_cls.int())
@@ -146,7 +161,7 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
                     x_seg,
                     roi_size=(96, 96, 96),
                     sw_batch_size=2,
-                    predictor=lambda x: self.model(x)[0]
+                    predictor=lambda x: self.model(x,task="segmentation")[0]
                 )
                 
                 loss_seg = self.seg_loss_fn(y_hat_seg, y_seg)
@@ -236,7 +251,6 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
                 "interval": 'step'
             }
          }
-
 
 
 class MultiTaskHemorrhageModule_gradnorm(pl.LightningModule):
