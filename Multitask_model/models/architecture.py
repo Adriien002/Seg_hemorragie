@@ -95,21 +95,12 @@ class BasicUNetWithClassification(nn.Module):
                 x4 = x4.view(batch_size, num_patches, *x4.shape[1:])
                 
                 # Agrégation: [B, N, C, H, W, D] -> [B, C, H, W, D]
-                aggregated = torch.max(x4, dim=1)[0]  # Max pooling sur les patches
-                
+                #aggregated = torch.max(x4, dim=1)[0]  # Max pooling sur les patches
+                #aggregated = torch.mean(x4, dim=1) 
                 # Classification
-                cls_logits = self.cls_head(aggregated)
-                return None, cls_logits
-            
-            else:  # Single patch [B, C, H, W, D]
-                x0 = self.conv_0(x)
-                x1 = self.down_1(x0)
-                x2 = self.down_2(x1)
-                x3 = self.down_3(x2)
-                x4 = self.down_4(x3)
                 cls_logits = self.cls_head(x4)
                 return None, cls_logits
-                
+          
       
         
     
