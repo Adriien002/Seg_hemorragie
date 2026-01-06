@@ -1,19 +1,5 @@
 import models.architecture as Arch
-import pytorch_lightning as pl
-from monai.inferers import sliding_window_inference
-from monai.losses import DiceCELoss
-from monai.metrics import DiceHelper
-from torch.optim import SGD, Adam
-from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torchmetrics.classification import MultilabelRecall, MultilabelAUROC, MultilabelPrecision
-from transformers import get_linear_schedule_with_warmup
-import torch
-import config
-import torch.nn as nn
-
-
-
-import models.architecture as Arch
+import os
 import pytorch_lightning as pl
 from monai.inferers import sliding_window_inference
 from monai.losses import DiceCELoss
@@ -29,7 +15,7 @@ import torch.nn as nn
 
 
 class MultiTaskHemorrhageModule(pl.LightningModule):
-    def __init__(self, num_steps: int, seg_weight: float = 1.0, cls_weight: float = 0.5):
+    def __init__(self, num_steps: int, seg_weight: float = 1.0, cls_weight: float = 0.3):
         super().__init__()
         self.save_hyperparameters()
         
@@ -87,13 +73,17 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
             y_cls = batch["classification"]["label"]
 
         # Forward pass
-            _ ,cls_logits = self.model(x_cls, task="classification")
+            _ , cls_logits = self.model(x_cls, task="classification")
 
         # Loss classification
             loss_cls = self.cls_loss_fn(cls_logits, y_cls)
             
             total_loss+=loss_cls
-           
+           # AJOUTE ÇA POUR DEBUGGER :
+            print(f"DEBUG CLS: logits shape {cls_logits.shape}, target shape {y_cls.shape}")
+    
+   
+   
 
     #     # Log etc.
 
@@ -109,8 +99,9 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
             loss_seg = self.seg_loss_fn(seg_logits, y_seg)
             total_loss += loss_seg
        
-
-        # Log à compléter
+        if batch_idx % 10 == 0:
+            print(f"[Batch {batch_idx}] alloc: {torch.cuda.memory_allocated()/1e9:.2f} GB, "
+              f"reserved: {torch.cuda.memory_reserved()/1e9:.2f} GB")
         # Batch size pour log
         batch_size = 0
         if batch["classification"] is not None:
@@ -143,7 +134,7 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
                 x_cls = batch["classification"]["image"]
                 y_cls = batch["classification"]["label"]
                 
-                _ , y_hat_cls = self.model(x_cls, task="classification")
+                _, y_hat_cls = self.model(x_cls, task="classification")
                 loss_cls = self.cls_loss_fn(y_hat_cls, y_cls)
                 y_cls_pred = torch.sigmoid(y_hat_cls).as_tensor()
                 self.cls_auc.update(y_cls_pred, y_cls.int())
@@ -215,6 +206,9 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
             self.cls_mean_auc.reset()
             self.cls_mean_precision.reset()
             self.cls_mean_recall.reset()
+            
+            
+            
         
     # def configure_optimizers(self):
     #     optimizer = torch.optim.Adam(self.parameters(), lr=1e-3, weight_decay=1e-5)
@@ -236,7 +230,83 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
     #         "frequency": 1
     #     }
     # }
-          
+    
+    
+    
+    def predict_step(self, batch, batch_idx, dataloader_idx=0):
+        # 1. GESTION DU TYPE DE BATCH
+        # Si on utilise le DataLoader Multitâche avec Collate, les données sont sous la clé "segmentation"
+        if "segmentation" in batch:
+            data = batch["segmentation"]
+        else:
+            # Si on utilise un DataLoader standard (Test set pur segmentation), les clés sont directes
+            data = batch
+            
+        # Sécurité : Si le batch est vide (cas rare du collate), on sort
+        if data is None: 
+            return None
+
+        # Adaptation des clés (ton ancien code utilisait 'seg', tes transforms utilisent 'label')
+        # On cherche 'image' et 'label' (ou 'seg')
+        x = data["image"]
+        y = data.get("label", data.get("seg")) # Compatible avec les deux noms
+
+        # 2. DÉFINITION DU PRÉDICTEUR CUSTOM
+        # C'est l'astuce vitale : on crée une petite fonction qui :
+        # - Prend les patchs (x)
+        # - Force la task="segmentation"
+        # - Ne garde que le premier élément du tuple (logits) pour que le sliding window soit content
+        def seg_predictor(patch):
+            logits, _ = self.model(patch, task="segmentation")
+            return logits
+
+        # 3. INFÉRENCE (Sliding Window)
+        # On passe notre 'seg_predictor' au lieu de self.model
+        y_hat = sliding_window_inference(
+            inputs=x,
+            roi_size=(96, 96, 96), # Doit matcher ta taille d'entrainement
+            sw_batch_size=2,       # Ajuste selon ta VRAM (4 est souvent possible en inférence)
+            predictor=seg_predictor,
+            overlap=0.5            # Standard pour éviter les effets de bord
+        )
+        
+        # --- (Le reste est quasi identique à ton code, adapté aux nouvelles clés) ---
+
+        # Calcul des scores Dice (Optionnel si tu as le Ground Truth)
+        dice_scores = {}
+        if y is not None:
+            # Assure-toi que y_hat et y sont sur le même device
+            scores, _ = self.dice_metric(y_hat, y)
+            for class_idx in range(scores.shape[1]):
+                dice_scores[f"dice_c{class_idx+1}"] = scores[0, class_idx].item()
+        
+        # Récupération du nom de fichier (Robustesse pour MONAI)
+        filename = "unknown"
+        if "image_meta_dict" in data: # Cas standard MONAI
+             meta = data["image_meta_dict"]
+        elif "image" in data and hasattr(data["image"], "meta"): # Cas Tenseur enrichi
+             meta = data["image"].meta
+        else:
+             meta = {}
+
+        if "filename_or_obj" in meta:
+            val = meta["filename_or_obj"]
+            # Gère le cas où c'est une liste ou une string
+            full_path = val[0] if isinstance(val, list) else val
+            filename = os.path.basename(full_path)
+
+        return {
+            'preds': y_hat.cpu(),  
+            'dice': dice_scores,
+            'filename': filename,
+            'ground_truth': y.cpu() if y is not None else None,
+            # On ne renvoie pas l'image originale pour économiser la RAM en inférence massive
+            # 'original_image': x.cpu(), 
+            'affine': meta.get("affine", torch.eye(4)),
+            'original_shape': meta.get("spatial_shape", y_hat.shape[2:]),
+        }                                      
+        
+  
     def configure_optimizers(self):
 
         optimizer = SGD(self.parameters(), lr=1e-3, momentum=0.99, nesterov=True, weight_decay=0.00003)

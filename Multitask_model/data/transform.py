@@ -2,11 +2,6 @@ from monai import transforms as T
 import torch
 import utils
 
-
-#Sliding window
-#Bien. Padder l'image pour avoir des dimensions multiples de 96
-    
-    
         
 class TaskBasedTransform_V2:
     """
@@ -15,6 +10,8 @@ class TaskBasedTransform_V2:
     def __init__(self, keys):
         
         print(">>> TaskBasedTransform initialized")
+        
+        
 
 
         self.seg_pipeline = T.Compose([
@@ -48,9 +45,9 @@ class TaskBasedTransform_V2:
         self.cls_pipeline = T.Compose([
             T.LoadImaged(keys=["image"], image_only=True),
             T.EnsureChannelFirstd(keys=["image"]),
+            T.CropForegroundd(keys=["image"], source_key='image'),
             T.Orientationd(keys=["image"], axcodes='RAS'),
             T.Spacingd(keys=["image"], pixdim=(1.0, 1.0, 1.0), mode="bilinear"),
-            T.CropForegroundd(keys=["image"], source_key='image'),
             T.ScaleIntensityRanged(
                 keys=["image"],
                 a_min=-10,a_max=140, 
@@ -60,56 +57,23 @@ class TaskBasedTransform_V2:
             T.RandRotate90d(keys=["image"], spatial_axes=(0, 1), prob=0.5),
             T.RandScaleIntensityd(keys=["image"], factors=0.1, prob=0.5),
             T.RandShiftIntensityd(keys=["image"], offsets=0.1, prob=0.5),
-            #T.ToTensord(keys=["image", "label"])
-        ])
-    
-        self.random_crop = T.Compose([
             T.RandSpatialCropd(keys=["image"], roi_size=(96, 96, 96), random_size=False),
-            T.ToTensord(keys=["image", "label"])  # ← Ajoute ça ici !
-])
-
+            T.ToTensord(keys=["image", "label"])
+        ])
+  
+   
         
-    # def __call__(self, data):
-    #     print("ouaii onejeiorjeopia")
-    #     task = data["task"]
-    #     if task == "segmentation":
-    #         return self.seg_pipeline(data)
-    #     elif task == "classification":
-    #         return self.cls_pipeline(data)
-    #     else:
-    #         raise ValueError(f"Tâche inconnue : {task}")
-        
-    # def __call__(self, data):
-    #     if data["task"] == "segmentation":
-    #         return self.seg_pipeline(data)
-        
-    #     elif data["task"] == "classification":
-    #         processed = self.cls_pipeline(data)
-            
-    #         patches = []
-    #         for _ in range(25):
-    #             patch_data = self.random_crop(processed.copy())
-                
-    #             # Crée un dict complet pour chaque patch
-    #             patch_dict = {
-    #                 "image": patch_data["image"],
-    #                 "label": processed["label"],  # ← Le label est le même pour tous les patches
-    #                 "task": "classification"
-    #             }
-    #             patches.append(patch_dict)  # ← Ajoute le DICT complet
-            
-    #         return patches
-    
     def __call__(self, data):
-        if data["task"] == "segmentation":
+        #print("ouaii onejeiorjeopia")
+        task = data["task"]
+        if task == "segmentation":
             return self.seg_pipeline(data)
+        elif task == "classification":
+            return self.cls_pipeline(data)
+        else:
+            raise ValueError(f"Tâche inconnue : {task}")
         
-        elif data["task"] == "classification":
-            processed = self.cls_pipeline(data)
-            
-            patches = utils.extract_sliding_window_patches(processed["image"], processed["label"], overlap=0.25)
-            
-            return patches
+   
 
 class TaskBasedValTransform_V2:
     """
@@ -118,13 +82,7 @@ class TaskBasedValTransform_V2:
     def __init__(self, keys):
         
         print(">>> TaskBasedValTransform initialized")
-   # Loading transforms
-  # Ensure we load both image and segmentation
-
- # who cares about the background ?
-  # make sure all images are the same orientation
-   # to isotropic spacing
- # make sure we have at least 96 slices
+ 
 
         self.seg_pipeline = T.Compose([
             T.LoadImaged(keys=["image", "label"], image_only=False),
@@ -145,59 +103,28 @@ class TaskBasedValTransform_V2:
         self.cls_pipeline = T.Compose([
             T.LoadImaged(keys=["image"], image_only=True),
             T.EnsureChannelFirstd(keys=["image"]),
+            T.CropForegroundd(keys=["image"], source_key='image'),
             T.Orientationd(keys=["image"], axcodes='RAS'),
             T.Spacingd(keys=["image"], pixdim=(1.0, 1.0, 1.0), mode="bilinear"),
-            T.CropForegroundd(keys=["image"], source_key='image'),
+        
             T.ScaleIntensityRanged(
                 keys=["image"],
                 a_min=-10,a_max=140, 
                 b_min=0.0, b_max=1.0, 
-                clip=True
-            )])
+                clip=True),
+            T.RandSpatialCropd(keys=["image"], roi_size=(96, 96, 96), random_size=False),
+            T.ToTensord(keys=["image", "label"]) ])
    
         
-        self.random_crop = T.Compose([
-            T.RandSpatialCropd(keys=["image"], roi_size=(96, 96, 96), random_size=False),
-            T.ToTensord(keys=["image", "label"]) 
-])
 
 
-    # def __call__(self, data):
-    #     print("Pipeline called for task:", data["task"])
-    #     if data["task"] == "segmentation":
-    #         return self.seg_pipeline(data)
-    #     elif data["task"] == "classification":
-    #         return self.cls_pipeline(data)
-    #     else:
-    #         raise ValueError(f"Tâche inconnue : {data['task']}")
-        
-    # def __call__(self, data):
-    #     if data["task"] == "segmentation":
-    #         return self.seg_pipeline(data)
-        
-    #     elif data["task"] == "classification":
-    #         processed = self.cls_pipeline(data)
-            
-    #         patches = []
-    #         for _ in range(25):
-    #             patch_data = self.random_crop(processed.copy())
-                
-    #             # Crée un dict complet pour chaque patch
-    #             patch_dict = {
-    #                 "image": patch_data["image"],
-    #                 "label": processed["label"],  # ← Le label est le même pour tous les patches
-    #                 "task": "classification"
-    #             }
-    #             patches.append(patch_dict)  # ← Ajoute le DICT complet
-            
-    #         return patches
+
     def __call__(self, data):
+        #print("Pipeline called for task:", data["task"])
         if data["task"] == "segmentation":
             return self.seg_pipeline(data)
-        
         elif data["task"] == "classification":
-            processed = self.cls_pipeline(data)
-            
-            patches = utils.extract_sliding_window_patches(processed["image"], processed["label"], overlap=0.00)
-            
-            return patches
+            return self.cls_pipeline(data)
+        else:
+            raise ValueError(f"Tâche inconnue : {data['task']}")
+        

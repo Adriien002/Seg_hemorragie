@@ -11,6 +11,9 @@ from monai.utils import ensure_tuple_rep
 
 
 
+#Version initiale sans aggrégation patch par attention 
+
+
 class BasicUNetWithClassification(nn.Module):
     def __init__(
         self,
@@ -26,6 +29,7 @@ class BasicUNetWithClassification(nn.Module):
         upsample: str = "deconv",
     ):
         super().__init__()
+        
         fea = ensure_tuple_rep(features, 6)
         print(f"BasicUNet features: {fea}.")
 
@@ -43,25 +47,24 @@ class BasicUNetWithClassification(nn.Module):
         self.upcat_1 = UpCat(spatial_dims, fea[1], fea[0], fea[5], act, norm, bias, dropout, upsample, halves=False)
 
         self.final_conv = Conv["conv", spatial_dims](fea[5], out_channels, kernel_size=1)
-
+     
         # Classification head → à partir du bottleneck x4
         self.cls_head = nn.Sequential(
-            nn.AdaptiveAvgPool3d((4, 4, 4)),
-            nn.Flatten(),
-            nn.Linear(fea[4] * 4 * 4 * 4, 512),
-            nn.LayerNorm(512), #nn.BatchNorm1d(512)
-            nn.LeakyReLU(inplace=True), #True
-            nn.Dropout(0.5),
-            nn.Linear(512, 256),
-            nn.LayerNorm(256), #nn.BatchNorm1d(256)
-            nn.LeakyReLU(inplace=True), #True
-            nn.Dropout(0.3),
-            nn.Linear(256, num_cls_classes)
-        )
+                            nn.Conv3d(fea[4], fea[4], kernel_size=1),
+                            nn.LeakyReLU(inplace=True),
+                            nn.AdaptiveMaxPool3d((2,2,2)),
+                            nn.Flatten(),
+                            nn.Linear(fea[4] * 8, 256),
+                            nn.LayerNorm(256),
+                            nn.LeakyReLU(inplace=True),
+                            nn.Dropout(0.3),
+                            nn.Linear(256, num_cls_classes)
+                        )
 
-    def forward(self, x: torch.Tensor, task: str = "segmentation"):
+    def forward(self, x: torch.Tensor, task: str = "segmentation",batch_size: int = None): # ajout de batch_size pour séparer patches et batch
+    
         if task == "segmentation":
-            # Ton code actuel pour la segmentation
+            # code actuel pour la segmentation
             x0 = self.conv_0(x)
             x1 = self.down_1(x0)
             x2 = self.down_2(x1)
@@ -77,30 +80,31 @@ class BasicUNetWithClassification(nn.Module):
             return seg_logits, None
 
         elif task == "classification":
-        # Gestion des multi-patches
-            if x.dim() == 6:  # [B, N, C, H, W, D]
-                batch_size, num_patches = x.shape[0], x.shape[1]
+         
+           
+        # X est de la shape : [B*N, C, H, W, D]
+      
                 
-                # RESHAPE CRITIQUE: [B, N, C, H, W, D] -> [B*N, C, H, W, D]
-                x_reshaped = x.view(-1, *x.shape[2:])  # [B*N, C, H, W, D]
-                
+               
                 # Forward sur tous les patches
-                x0 = self.conv_0(x_reshaped)
-                x1 = self.down_1(x0)
-                x2 = self.down_2(x1)
-                x3 = self.down_3(x2)
-                x4 = self.down_4(x3)  # [B*N, features, H', W', D']
-                
-                # Reshape back: [B*N, C, H, W, D] -> [B, N, C, H, W, D]
-                x4 = x4.view(batch_size, num_patches, *x4.shape[1:])
-                
-                # Agrégation: [B, N, C, H, W, D] -> [B, C, H, W, D]
-                #aggregated = torch.max(x4, dim=1)[0]  # Max pooling sur les patches
-                #aggregated = torch.mean(x4, dim=1) 
-                # Classification
-                cls_logits = self.cls_head(x4)
-                return None, cls_logits
+            x0 = self.conv_0(x)
+            x1 = self.down_1(x0)
+            x2 = self.down_2(x1)
+            x3 = self.down_3(x2)
+            x4 = self.down_4(x3)  # [B*N, features, H', W', D']
+            
+            
+            cls_logits = self.cls_head(x4) #et shape de sortie : torch.Size([2, 6])
+            return None, cls_logits
           
+
+
+
+
+
+
+
+
       
         
     
