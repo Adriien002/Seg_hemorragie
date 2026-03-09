@@ -4,12 +4,14 @@ import pandas as pd
 import numpy as np
 from torch.utils.data import Dataset
 import os
+import config
+import torch
 
 SEG_LABEL_COLS = ['any', 'epidural', 'intraparenchymal', 'intraventricular', 'subarachnoid', 'subdural']
 
-SEG_DIR = '/home/tibia/Projet_Hemorragie/Seg_hemorragie/split_MONAI'
-CLASSIFICATION_DATA_DIR = '/home/tibia/Projet_Hemorragie/MBH_label_case'
-SAVE_DIR = "/home/tibia/Projet_Hemorragie/MBH_multitask_pos_cases"
+SEG_DIR = config.SEG_DIR
+CLASSIFICATION_DATA_DIR = config.CLASSIFICATION_DATA_DIR
+SAVE_DIR = config.SAVE_DIR
 os.makedirs(SAVE_DIR, exist_ok=True)
 # ======================
 # DATA PREPARATION
@@ -28,11 +30,14 @@ def get_segmentation_data(split="train"):
         data.append({
             "image": str(img),
             "label": str(lbl),
+            "class_label": torch.tensor([0.0] * 6, dtype=torch.float32),  # Pas de label global pour la tête de segmentation
             "task": "segmentation"
         })
         
     return data
 
+CLASSIFICATION_DATA_DIR = "/home/tibia/Projet_Hemorragie/Datasets/mbh/MBH_label_case"
+PSEUDO_MASKS_DIR = "/home/tibia/Projet_Hemorragie/Datasets/mbh/Pseudo_Masks" # <-- Ton nouveau dossier
 
 def get_classification_data(split="train"):
     csv_path = Path(CLASSIFICATION_DATA_DIR) / "splits" / f"{split}_split.csv"
@@ -42,15 +47,42 @@ def get_classification_data(split="train"):
     
     data = []
     for _, row in df.iterrows():
-        image_path = str(nii_dir / f"{row['patientID_studyID']}.nii.gz")
-        label = np.array([row[col] for col in label_cols], dtype=np.float32)
+        patient_id = row['patientID_studyID']
+        image_path = str(nii_dir / f"{patient_id}.nii.gz")
+        pseudo_mask_path = str(Path(PSEUDO_MASKS_DIR) / f"{patient_id}.nii.gz")
         
+        # Le label global pour la tête de classification
+        class_label = np.array([row[col] for col in label_cols], dtype=np.float32)
+        
+        # Sécurité : on ignore le patient si nnU-Net a raté la prédiction
+        if not os.path.exists(pseudo_mask_path):
+            continue
+            
         data.append({
             "image": image_path,
-            "label": label,
+            "label": pseudo_mask_path,  # Le pseudo-masque devient le guide de coupe spatiale
+            "class_label": class_label, # L'information globale conservée pour la loss !
             "task": "classification"
         })
     return data
+
+# def get_classification_data(split="train"):
+#     csv_path = Path(CLASSIFICATION_DATA_DIR) / "splits" / f"{split}_split.csv"
+#     df = pd.read_csv(csv_path)
+#     nii_dir = Path(CLASSIFICATION_DATA_DIR)
+#     label_cols = ['any', 'epidural', 'intraparenchymal', 'intraventricular', 'subarachnoid', 'subdural']
+    
+#     data = []
+#     for _, row in df.iterrows():
+#         image_path = str(nii_dir / f"{row['patientID_studyID']}.nii.gz")
+#         label = np.array([row[col] for col in label_cols], dtype=np.float32)
+        
+#         data.append({
+#             "image": image_path,
+#             "label": label,
+#             "task": "classification"
+#         })
+#     return data
 
 
 def get_optimized_classification_data(split="train", seg_count=154):
@@ -97,4 +129,39 @@ def get_balanced_multitask_dataset(split="train"):
     cls_data = get_optimized_classification_data(split, seg_count)
     print(f"Nombre de données de segmentation : {len(seg_data)}")
     print(f"Nombre de données de classification : {len(cls_data)}")
+    return seg_data + cls_data
+
+
+def get_equalized_multitask_dataset(split="train"):
+    seg_data = get_segmentation_data(split)
+    seg_count = len(seg_data)
+
+    csv_path = Path(CLASSIFICATION_DATA_DIR) / "splits" / f"{split}_split.csv"
+    df = pd.read_csv(csv_path)
+    nii_dir = Path(CLASSIFICATION_DATA_DIR)
+    label_cols = ['any', 'epidural', 'intraparenchymal', 'intraventricular', 'subarachnoid', 'subdural']
+
+    # Identifier positifs/négatifs
+    df['is_positive'] = df[label_cols].sum(axis=1) > 0
+    positives = df[df['is_positive']]
+    negatives = df[~df['is_positive']]
+
+    # Équilibrer : même nombre de négatifs que de positifs
+    n_pos = len(positives)
+    selected_pos = positives
+    selected_neg = negatives.sample(n=min(n_pos, len(negatives)), random_state=42)
+
+    balanced_df = pd.concat([selected_pos, selected_neg]).sample(frac=1, random_state=42)
+
+    print(f"{split.upper()} - Positifs: {len(selected_pos)} | Négatifs: {len(selected_neg)}")
+
+    cls_data = [{
+        "image": str(nii_dir / f"{row['patientID_studyID']}.nii.gz"),
+        "label": np.array([row[col] for col in label_cols], dtype=np.float32),
+        "task": "classification"
+    } for _, row in balanced_df.iterrows()]
+
+    print(f"Nombre de données de segmentation : {seg_count}")
+    print(f"Nombre de données de classification équilibrées : {len(cls_data)}")
+
     return seg_data + cls_data
