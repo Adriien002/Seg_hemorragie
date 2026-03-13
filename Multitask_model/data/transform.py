@@ -231,6 +231,7 @@ class TaskBasedTransform_V3:
                 keys=['image', 'label'], image_key='image', label_key='label',
                 pos=5.0, neg=1.0, spatial_size=(64, 64, 64), num_samples=2
             ),
+            
             T.RandFlipd(keys=["image", "label"], spatial_axis=[0, 1], prob=0.5),
             T.RandRotate90d(keys=["image", "label"], spatial_axes=(0, 1), prob=0.5),
             T.RandScaleIntensityd(keys=["image"], factors=0.02, prob=0.5),
@@ -257,14 +258,35 @@ class TaskBasedTransform_V3:
                 keys=['image', 'label'], image_key='image', label_key='label',
                 pos=5.0, neg=1.0, spatial_size=(64, 64, 64), num_samples=2
             ),
-            
-            T.RandFlipd(keys=["image", "label"], spatial_axis=[0, 1], prob=0.5),
-            T.RandRotate90d(keys=["image", "label"], spatial_axes=(0, 1), prob=0.5),
+            T.DeleteItemsd(keys=["label"]),  # On supprime le pseudo-masque après le crop
+            T.RandFlipd(keys=["image"], spatial_axis=[0, 1], prob=0.5),
+            T.RandRotate90d(keys=["image"], spatial_axes=(0, 1), prob=0.5),
             T.RandScaleIntensityd(keys=["image"], factors=0.02, prob=0.5),
             T.RandShiftIntensityd(keys=["image"], offsets=0.05, prob=0.5),
             
             # On convertit tout en tenseur, y compris les labels globaux
-            T.ToTensord(keys=["image", "label"]) 
+            T.ToTensord(keys=["image", "class_label"]) 
+        ])
+        
+        self.cls_pipeline_no_mask = T.Compose([
+            T.LoadImaged(keys=["image"], image_only=True),
+            T.EnsureChannelFirstd(keys=["image"]),
+            T.CropForegroundd(keys=["image"], source_key='image'),
+            T.Orientationd(keys=["image"], axcodes='RAS'),
+            T.Spacingd(keys=["image"], pixdim=(1.0, 1.0, 1.0), mode="bilinear"),
+            T.SpatialPadd(keys=["image"], spatial_size=(96, 96, 96)),
+            T.ScaleIntensityRanged(keys=["image"], a_min=-10, a_max=140,
+                                   b_min=0.0, b_max=1.0, clip=True),
+            # Crop random — pas de masque guide
+            T.RandSpatialCropSamplesd(
+                keys=["image"], roi_size=(64, 64, 64),
+                num_samples=1, random_size=False
+            ),
+            T.RandFlipd(keys=["image"], spatial_axis=[0, 1], prob=0.5),
+            T.RandRotate90d(keys=["image"], spatial_axes=(0, 1), prob=0.5),
+            T.RandScaleIntensityd(keys=["image"], factors=0.02, prob=0.5),
+            T.RandShiftIntensityd(keys=["image"], offsets=0.05, prob=0.5),
+            T.ToTensord(keys=["image"])
         ])
         
     def __call__(self, data):
@@ -272,9 +294,13 @@ class TaskBasedTransform_V3:
         if task == "segmentation":
             return self.seg_pipeline(data)
         elif task == "classification":
-            return self.cls_pipeline(data)
+            if data.get("has_mask", True):
+                return self.cls_pipeline(data)
+            else:
+                return self.cls_pipeline_no_mask(data)
         else:
             raise ValueError(f"Tâche inconnue : {task}")
+
         
         
 class TaskBasedValTransform_V3:
@@ -288,7 +314,7 @@ class TaskBasedValTransform_V3:
             T.Orientationd(keys=["image", "label"], axcodes='RAS'),
             T.Spacingd(keys=["image", "label"], pixdim=(1.0, 1.0, 1.0), mode=["bilinear", "nearest"]),
             # En validation segmentation, on utilise souvent le Crop guidé ou le Sliding Window plus tard
-            T.SpatialPadd(keys=["image", "label"], spatial_size=(64, 64, 64)),
+            T.SpatialPadd(keys=["image", "label"], spatial_size=(96, 96, 96)), # wtf 
             T.ScaleIntensityRanged(keys=["image"], a_min=-10, a_max=140, b_min=0.0, b_max=1.0, clip=True)
         ])
        
@@ -307,13 +333,33 @@ class TaskBasedValTransform_V3:
                 keys=['image', 'label'], image_key='image', label_key='label',
                 pos=1.0, neg=0.0, spatial_size=(64, 64, 64), num_samples=1
             ),
-            T.ToTensord(keys=["image", "label"]) 
+            T.DeleteItemsd(keys=["label"]),  # Supprimer le pseudo-masque
+            
+            T.ToTensord(keys=["image", "class_label"]) 
+        ])
+        
+        self.cls_pipeline_no_mask = T.Compose([
+            T.LoadImaged(keys=["image"], image_only=True),
+            T.EnsureChannelFirstd(keys=["image"]),
+            T.CropForegroundd(keys=["image"], source_key='image'),
+            T.Orientationd(keys=["image"], axcodes='RAS'),
+            T.Spacingd(keys=["image"], pixdim=(1.0, 1.0, 1.0), mode="bilinear"),
+            T.SpatialPadd(keys=["image"], spatial_size=(96, 96, 96)),
+            T.ScaleIntensityRanged(keys=["image"], a_min=-10, a_max=140,
+                                   b_min=0.0, b_max=1.0, clip=True),
+            # Crop central déterministe — pas de random en val
+            T.CenterSpatialCropd(keys=["image"], roi_size=(64, 64, 64)),
+            T.ToTensord(keys=["image"])
         ])
 
     def __call__(self, data):
-        if data["task"] == "segmentation":
+        task = data["task"]
+        if task == "segmentation":
             return self.seg_pipeline(data)
-        elif data["task"] == "classification":
-            return self.cls_pipeline(data)
+        elif task == "classification":
+            if data.get("has_mask", True):
+                return self.cls_pipeline(data)
+            else:
+                return self.cls_pipeline_no_mask(data)
         else:
-            raise ValueError(f"Tâche inconnue : {data['task']}")
+            raise ValueError(f"Tâche inconnue : {task}")

@@ -3,6 +3,8 @@ from collections.abc import Iterable
 import torch
 import pandas as pd
 
+
+
 def flatten(batch):
     for item in batch:
         if isinstance(item, list):
@@ -10,27 +12,79 @@ def flatten(batch):
         else:
             yield item
 
+
+# def _sanitize_item(item: dict) -> dict:
+#     """
+#     Convertit les champs non-MetaTensor en torch.Tensor purs
+#     pour éviter que list_data_collate ne panique sur les métadonnées.
+#     """
+#     out = {}
+#     for k, v in item.items():
+#         if isinstance(v, np.ndarray):
+#             out[k] = torch.from_numpy(v)
+#         elif isinstance(v, (int, float)):
+#             out[k] = torch.tensor(v)
+#         else:
+#             out[k] = v  # MetaTensor, str, etc. → inchangé
+#     return out
+
+
+# def multitask_collate_fn(batch):
+#     flat_batch = list(flatten(batch))
+
+#     classification_batch = []
+#     segmentation_batch = []
+
+#     for item in flat_batch:
+#         task = item["task"]
+#         #sanitized = _sanitize_item(item)
+        
+#         if task == "classification":
+#             classification_batch.append(item)
+#         elif task == "segmentation":
+#             segmentation_batch.append(item)
+#         else:
+#             raise ValueError(f"Tâche inconnue : {task}")
+
+#     result = {
+#         "classification": list_data_collate(classification_batch) if classification_batch else None,
+#         "segmentation": list_data_collate(segmentation_batch) if segmentation_batch else None,
+#     }
+#     return result
+
+
 def multitask_collate_fn(batch):
-    flat_batch = list(flatten(batch))  
+    flat_batch = list(flatten(batch))
 
     classification_batch = []
     segmentation_batch = []
 
     for item in flat_batch:
         if item["task"] == "classification":
+            # Retire label si None
+            if item.get("label") is None:
+                item = {k: v for k, v in item.items() if k != "label"}
+
+            # Force class_label en torch.Tensor pur — pas MetaTensor
+            cl = item["class_label"]
+            if not isinstance(cl, torch.Tensor):
+                cl = torch.as_tensor(cl, dtype=torch.float32)
+            
+
             classification_batch.append(item)
+
         elif item["task"] == "segmentation":
             segmentation_batch.append(item)
-           
         else:
             raise ValueError(f"Tâche inconnue : {item['task']}")
 
     result = {
         "classification": list_data_collate(classification_batch) if classification_batch else None,
-        "segmentation": list_data_collate(segmentation_batch) if segmentation_batch else None
+        "segmentation":   list_data_collate(segmentation_batch)   if segmentation_batch   else None,
     }
-    
+
     return result
+  
 
 
 def calculate_pos_weights(csv_path, label_cols):
@@ -50,40 +104,44 @@ def calculate_pos_weights(csv_path, label_cols):
 import torch
 import itertools
 
-def extract_sliding_window_patches(image_tensor, label, roi_size=(96, 96, 96), overlap=0.25):
+
+import torch
+import itertools
+import random
+
+def extract_sliding_window_patches(
+    image_tensor,
+    label,
+    roi_size=(96, 96, 96),
+    overlap=0.25,
+    max_patches=18  
+):
     """
-    Extrait patches avec sliding window.
-    
-    Args:
-        image_tensor: Tensor [C, H, W, D]
-        label: Label de classification
-        roi_size: Taille des patches
-        overlap: Pourcentage de chevauchement (0.0 à 0.99)
-    
-    Returns:
-        Liste de dicts avec 'image', 'label', 'task'
+    Extrait un nombre limité de patches avec une fenêtre glissante.
     """
     C, H, W, D = image_tensor.shape
-    
-    # Calcule le stride
+
     stride = tuple(int(r * (1 - overlap)) for r in roi_size)
-   
-    
-    # # Génère les positions de départ pour chaque dimension
+
     def get_starts(dim_size, roi_dim, stride_dim):
         starts = list(range(0, dim_size - roi_dim + 1, stride_dim))
-        # Assure la couverture complète
         if starts[-1] + roi_dim < dim_size:
             starts.append(dim_size - roi_dim)
         return starts
-    
+
     h_starts = get_starts(H, roi_size[0], stride[0])
     w_starts = get_starts(W, roi_size[1], stride[1])
     d_starts = get_starts(D, roi_size[2], stride[2])
 
-    
+    # 🔹 Génère toutes les positions possibles
+    all_coords = list(itertools.product(h_starts, w_starts, d_starts))
+
+    # 🔹 Si trop de patches, on en prend un sous-ensemble aléatoire
+    if len(all_coords) > max_patches:
+        all_coords = random.sample(all_coords, max_patches)
+
     patches = []
-    for h, w, d in itertools.product(h_starts, w_starts, d_starts):
+    for h, w, d in all_coords:
         patch = image_tensor[
             :,
             h:h + roi_size[0],
@@ -96,9 +154,6 @@ def extract_sliding_window_patches(image_tensor, label, roi_size=(96, 96, 96), o
             "label": label,
             "task": "classification"
         })
-        
-         
 
-    
 
     return patches

@@ -279,9 +279,10 @@ from transformers import get_linear_schedule_with_warmup
 import torch
 import config
 import torch.nn as nn
+import data.dataset as dataset
 
 class MultiTaskHemorrhageModule(pl.LightningModule):
-    def __init__(self, num_steps: int, seg_weight: float = 1.0, cls_weight: float = 1.0):
+    def __init__(self, num_steps: int, seg_weight: float = 1.0, cls_weight: float = 0.5):
         super().__init__()
         self.save_hyperparameters()
         
@@ -300,7 +301,7 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
         # --- CORRECTION DEVICE POUR LES POIDS ---
         # On enregistre les poids comme un buffer du modèle. 
         # PyTorch Lightning les mettra automatiquement sur le bon GPU.
-        pos_weights = torch.tensor([1.0] * config.NUM_CLASSES, dtype=torch.float)
+        pos_weights = dataset.compute_pos_weights(split="train")  # Calcule les poids à partir des données d'entraînement
         self.register_buffer("pos_weights", pos_weights)
         
         # Fonctions de perte
@@ -384,7 +385,9 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
             _, y_hat_cls = self.model(x_cls, task="classification")
             loss_cls = self.cls_loss_fn(y_hat_cls, y_cls)
             
-            y_cls_pred = torch.sigmoid(y_hat_cls)
+          
+            y_cls_pred = torch.sigmoid(y_hat_cls).as_tensor()
+#                
             self.cls_auc.update(y_cls_pred, y_cls.int())
             self.cls_mean_auc.update(y_cls_pred, y_cls.int())
             self.cls_mean_precision.update(y_cls_pred, y_cls.int())

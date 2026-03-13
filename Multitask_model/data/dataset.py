@@ -36,53 +36,62 @@ def get_segmentation_data(split="train"):
         
     return data
 
-CLASSIFICATION_DATA_DIR = "/home/tibia/Projet_Hemorragie/Datasets/mbh/MBH_label_case"
-PSEUDO_MASKS_DIR = "/home/tibia/Projet_Hemorragie/Datasets/mbh/Pseudo_Masks" # <-- Ton nouveau dossier
+
 
 def get_classification_data(split="train"):
-    csv_path = Path(CLASSIFICATION_DATA_DIR) / "splits" / f"{split}_split.csv"
-    df = pd.read_csv(csv_path)
-    nii_dir = Path(CLASSIFICATION_DATA_DIR)
+    nii_dir   = Path(CLASSIFICATION_DATA_DIR)
     label_cols = ['any', 'epidural', 'intraparenchymal', 'intraventricular', 'subarachnoid', 'subdural']
-    
-    data = []
+
+    # ── Positifs ─────────────────────────────────────────────────────────────
+    df = pd.read_csv(nii_dir / "splits" / f"{split}_split.csv")
+    positives = []
     for _, row in df.iterrows():
-        patient_id = row['patientID_studyID']
-        image_path = str(nii_dir / f"{patient_id}.nii.gz")
-        pseudo_mask_path = str(Path(PSEUDO_MASKS_DIR) / f"{patient_id}.nii.gz")
-        
-        # Le label global pour la tête de classification
-        class_label = np.array([row[col] for col in label_cols], dtype=np.float32)
-        
-        # Sécurité : on ignore le patient si nnU-Net a raté la prédiction
-        if not os.path.exists(pseudo_mask_path):
-            continue
-            
-        data.append({
-            "image": image_path,
-            "label": pseudo_mask_path,  # Le pseudo-masque devient le guide de coupe spatiale
-            "class_label": class_label, # L'information globale conservée pour la loss !
-            "task": "classification"
+        pid = row['patientID_studyID']
+        mask_path = str(Path(config.PSEUDO_MASKS_DIR) / f"{pid}.nii.gz")
+        if not os.path.exists(mask_path):
+            continue  # nnU-Net a raté ce cas, on skip
+        positives.append({
+            "image":       str(nii_dir / f"{pid}.nii.gz"),
+            "label":       mask_path,
+            "class_label": torch.tensor(
+                       np.array([row[col] for col in label_cols], dtype=np.float32)
+                   ),
+            "has_mask":    True,
+            "task":        "classification"
         })
+
+    # ── Sains ────────────────────────────────────────────────────────────────
+    healthy_df = pd.read_csv(nii_dir / "splits" / f"{split}_healthy_split.csv")
+    negatives = [{
+        "image":       str(nii_dir / f"{row['patientID_studyID']}.nii.gz"),
+        "label":       None,
+        "class_label":  torch.tensor([0.0] * 6, dtype=torch.float32),
+        "has_mask":    False,
+        "task":        "classification"
+    } for _, row in healthy_df.iterrows()]
+
+    data = positives + negatives
+    np.random.default_rng(seed=42).shuffle(data)
+
+    print(f"{split.upper()} cls — positifs: {len(positives)} | sains: {len(negatives)} | total: {len(data)}")
     return data
 
-# def get_classification_data(split="train"):
-#     csv_path = Path(CLASSIFICATION_DATA_DIR) / "splits" / f"{split}_split.csv"
-#     df = pd.read_csv(csv_path)
-#     nii_dir = Path(CLASSIFICATION_DATA_DIR)
-#     label_cols = ['any', 'epidural', 'intraparenchymal', 'intraventricular', 'subarachnoid', 'subdural']
-    
-#     data = []
-#     for _, row in df.iterrows():
-#         image_path = str(nii_dir / f"{row['patientID_studyID']}.nii.gz")
-#         label = np.array([row[col] for col in label_cols], dtype=np.float32)
-        
-#         data.append({
-#             "image": image_path,
-#             "label": label,
-#             "task": "classification"
-#         })
-#     return data
+
+def compute_pos_weights(split="train"):
+    """pos_weight[i] = n_neg_i / n_pos_i — pour BCEWithLogitsLoss"""
+    data   = get_classification_data(split)
+    labels = np.array([d["class_label"] for d in data])   # (N, 6)
+    n_pos  = labels.sum(axis=0)
+    n_neg  = len(labels) - n_pos
+    pos_weight = n_neg / np.maximum(n_pos, 1)
+
+    print("pos_weights :")
+    for name, w, p, n in zip(config.CLASS_NAMES, pos_weight, n_pos, n_neg):
+        print(f"  {name:25s}: {w:.2f}  ({int(p)} pos / {int(n)} neg)")
+
+    return torch.tensor(pos_weight, dtype=torch.float32)
+
+
 
 
 def get_optimized_classification_data(split="train", seg_count=154):
