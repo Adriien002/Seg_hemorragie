@@ -386,7 +386,7 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
             loss_cls = self.cls_loss_fn(y_hat_cls, y_cls)
             
           
-            y_cls_pred = torch.sigmoid(y_hat_cls).as_tensor()
+            y_cls_pred = torch.sigmoid(y_hat_cls)#.as_tensor()
 #                
             self.cls_auc.update(y_cls_pred, y_cls.int())
             self.cls_mean_auc.update(y_cls_pred, y_cls.int())
