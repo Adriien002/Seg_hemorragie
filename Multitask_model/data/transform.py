@@ -7,7 +7,7 @@ import utils
 #Bien. Padder l'image pour avoir des dimensions multiples de 96
     
     
-        
+         
 class TaskBasedTransform_V2:
     """
     Applique un pipeline différent selon la tâche : "segmentation" ou "classification".
@@ -218,7 +218,7 @@ class TaskBasedTransform_V3:
     def __init__(self, keys=None):
         print(">>> TaskBasedTransform V2 (Guided MTL) initialized")
 
-        # --- PIPELINE DE SEGMENTATION (Inchangée, mais sort le class_label) ---
+        # --- PIPELINE DE SEGMENTATION  ---
         self.seg_pipeline = T.Compose([
             T.LoadImaged(keys=["image", "label"], image_only=True),
             T.EnsureChannelFirstd(keys=["image", "label"]),
@@ -248,12 +248,12 @@ class TaskBasedTransform_V3:
             T.CropForegroundd(keys=["image", "label"], source_key='image'),
             T.Orientationd(keys=["image", "label"], axcodes='RAS'),
             
-            # MAGIE 1 : Retour au 1mm ! L'encodeur ne deviendra plus fou.
+            # Pixdim à 1mm pour la classification aussi, pour que le crop soit plus précis sur la lésion
             T.Spacingd(keys=["image", "label"], pixdim=(1.0, 1.0, 1.0), mode=["bilinear", "nearest"]),
             T.SpatialPadd(keys=["image", "label"], spatial_size=(96, 96, 96)),
             T.ScaleIntensityRanged(keys=["image"], a_min=-10, a_max=140, b_min=0.0, b_max=1.0, clip=True),
             
-            # MAGIE 2 : MONAI utilise le pseudo-masque pour centrer le patch de 64x64x64 sur la lésion.
+            # MAGIE 2 : utilisation  pseudo-masque pour centrer le patch de 64x64x64 sur la lésion.
             T.RandCropByPosNegLabeld(
                 keys=['image', 'label'], image_key='image', label_key='label',
                 pos=5.0, neg=1.0, spatial_size=(64, 64, 64), num_samples=2
@@ -264,7 +264,7 @@ class TaskBasedTransform_V3:
             T.RandScaleIntensityd(keys=["image"], factors=0.02, prob=0.5),
             T.RandShiftIntensityd(keys=["image"], offsets=0.05, prob=0.5),
             
-            # On convertit tout en tenseur, y compris les labels globaux
+            
             T.ToTensord(keys=["image", "class_label"]) 
         ])
         
@@ -277,7 +277,7 @@ class TaskBasedTransform_V3:
             T.SpatialPadd(keys=["image"], spatial_size=(96, 96, 96)),
             T.ScaleIntensityRanged(keys=["image"], a_min=-10, a_max=140,
                                    b_min=0.0, b_max=1.0, clip=True),
-            # Crop random — pas de masque guide
+            # Crop random — pas de masque guide , on mais que 1 patch par image pour pas exploser la mémoire
             T.RandSpatialCropSamplesd(
                 keys=["image"], roi_size=(64, 64, 64),
                 num_samples=1, random_size=False
@@ -286,7 +286,7 @@ class TaskBasedTransform_V3:
             T.RandRotate90d(keys=["image"], spatial_axes=(0, 1), prob=0.5),
             T.RandScaleIntensityd(keys=["image"], factors=0.02, prob=0.5),
             T.RandShiftIntensityd(keys=["image"], offsets=0.05, prob=0.5),
-            T.ToTensord(keys=["image"])
+            T.ToTensord(keys=["image", "class_label"])
         ])
         
     def __call__(self, data):
@@ -313,7 +313,6 @@ class TaskBasedValTransform_V3:
             T.CropForegroundd(keys=["image", "label"], source_key='image'),
             T.Orientationd(keys=["image", "label"], axcodes='RAS'),
             T.Spacingd(keys=["image", "label"], pixdim=(1.0, 1.0, 1.0), mode=["bilinear", "nearest"]),
-            # En validation segmentation, on utilise souvent le Crop guidé ou le Sliding Window plus tard
             T.SpatialPadd(keys=["image", "label"], spatial_size=(96, 96, 96)), # wtf 
             T.ScaleIntensityRanged(keys=["image"], a_min=-10, a_max=140, b_min=0.0, b_max=1.0, clip=True)
         ])
@@ -347,9 +346,8 @@ class TaskBasedValTransform_V3:
             T.SpatialPadd(keys=["image"], spatial_size=(96, 96, 96)),
             T.ScaleIntensityRanged(keys=["image"], a_min=-10, a_max=140,
                                    b_min=0.0, b_max=1.0, clip=True),
-            # Crop central déterministe — pas de random en val
-            T.CenterSpatialCropd(keys=["image"], roi_size=(64, 64, 64)),
-            T.ToTensord(keys=["image"])
+            T.RandSpatialCropSamplesd(keys=["image"], roi_size=(64, 64, 64), num_samples=1),
+            T.ToTensord(keys=["image", "class_label"])
         ])
 
     def __call__(self, data):
