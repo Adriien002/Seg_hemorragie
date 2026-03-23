@@ -581,18 +581,21 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
             self.log("val_cls_loss", loss, batch_size=x.shape[0])
 
         # 2. Segmentation Orig
-        if batch.get("seg_orig ") is not None:
+        if batch.get("seg_orig") is not None:
             x, y = batch["seg_orig"]["image"], batch["seg_orig"]["label"]
             y_hat = sliding_window_inference(x, roi_size=(64, 64, 64), sw_batch_size=2, predictor=lambda img: self.model(img, task="seg_orig")[0])
             
             loss = self.seg_loss_fn(y_hat, y)
             scores, _ = self.seg_orig_dice(y_hat, y)
             
-            for label in y.unique().long().tolist()[1:]:
-                self.log(f'val_orig_dice_c{label}', scores[0][label - 1].item())
-                
-            total_loss += self.hparams.seg_orig_weight * loss
-            self.log("val_seg_orig_loss", loss, batch_size=x.shape[0])
+            y_labels = y.unique().long().tolist()[1:]
+            scores = {label: scores[0][label - 1].item() for label in y_labels}
+            metrics = {f'dice_c{label}': score for label, score in scores.items()}
+            
+            self.log_dict(metrics, on_epoch=True, prog_bar=True)
+            total_loss += loss
+        
+            self.log("val_seg_loss", loss, batch_size=x.shape[0])
 
         # 3. Segmentation In-House
         if batch.get("seg_inhouse") is not None:
@@ -605,7 +608,7 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
             for label in y.unique().long().tolist()[1:]:
                 self.log(f'val_inhouse_dice_c{label}', scores[0][label - 1].item())
                 
-            total_loss += self.hparams.seg_inhouse_weight * loss
+            total_loss +=  loss
             self.log("val_seg_inhouse_loss", loss, batch_size=x.shape[0])
 
         self.log("val_loss", total_loss, on_epoch=True, prog_bar=True)
