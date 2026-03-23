@@ -13,6 +13,7 @@ SEG_DIR = config.SEG_DIR
 CLASSIFICATION_DATA_DIR = config.CLASSIFICATION_DATA_DIR
 SAVE_DIR = config.SAVE_DIR
 os.makedirs(SAVE_DIR, exist_ok=True)
+SEG_IN_HOUSE_DIR = config.IN_HOUSE_DIR
 # ======================
 # DATA PREPARATION
 # ======================
@@ -36,6 +37,49 @@ def get_segmentation_data(split="train"):
         
     return data
 
+
+def get_segmentation_data(split="train"):
+    img_dir = Path(SEG_DIR) / split / "img"
+    seg_dir = Path(SEG_DIR) / split / "seg"
+    
+    images = sorted(img_dir.glob("*.nii.gz"))
+    labels = sorted(seg_dir.glob("*.nii.gz"))
+    
+    assert len(images) == len(labels), "Mismatch between image and label counts"
+
+    data = []
+    for img, lbl in zip(images, labels):
+        data.append({
+            "image": str(img),
+            "label": str(lbl),
+            "class_label": torch.tensor([0.0] * 6, dtype=torch.float32),
+            "task": "seg_orig"  # <-- MODIFIÉ ICI
+        })
+        
+    return data
+
+def get_inhouse_segmentation_data(split="train"):
+    # Utilise le préfixe défini dans config (ex: "/.../split_in_house_" + "train" = "/.../split_in_house_train")
+  
+    
+    img_dir = Path(SEG_IN_HOUSE_DIR) / split / "img"
+    seg_dir = Path(SEG_IN_HOUSE_DIR) / split / "seg"
+    
+    images = sorted(img_dir.glob("*.nii.gz"))
+    labels = sorted(seg_dir.glob("*.nii.gz"))
+    
+    assert len(images) == len(labels), f"Mismatch between In-House image and label counts for split {split}"
+
+    data = []
+    for img, lbl in zip(images, labels):
+        data.append({
+            "image": str(img),
+            "label": str(lbl),
+            "class_label": torch.tensor([0.0] * 6, dtype=torch.float32), 
+            "task": "seg_inhouse"  # <-- NOUVELLE TÂCHE
+        })
+        
+    return data
 
 
 def get_classification_data(split="train"):
@@ -125,12 +169,16 @@ def get_optimized_classification_data(split="train", seg_count=154):
     } for _, row in balanced_df.iterrows()]
     
     
+# def get_multitask_dataset(split="train"):
+#     seg_data = get_segmentation_data(split)
+#     cls_data = get_classification_data(split)
+#     return seg_data + cls_data
+
 def get_multitask_dataset(split="train"):
-    seg_data = get_segmentation_data(split)
+    seg_orig_data = get_segmentation_data(split)
+    seg_inhouse_data = get_inhouse_segmentation_data(split)
     cls_data = get_classification_data(split)
-    return seg_data + cls_data
-
-
+    return seg_orig_data + seg_inhouse_data + cls_data
 
 def get_balanced_multitask_dataset(split="train"):
     seg_data = get_segmentation_data(split)
