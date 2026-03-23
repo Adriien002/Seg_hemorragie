@@ -2,7 +2,7 @@ from monai.data.utils import list_data_collate
 from collections.abc import Iterable
 import torch
 import pandas as pd
-
+import numpy as np
 
 
 def flatten(batch):
@@ -37,12 +37,12 @@ def flatten(batch):
 
 #     for item in flat_batch:
 #         task = item["task"]
-#         #sanitized = _sanitize_item(item)
+#         sanitized = _sanitize_item(item)
         
 #         if task == "classification":
-#             classification_batch.append(item)
+#             classification_batch.append(sanitized)
 #         elif task == "segmentation":
-#             segmentation_batch.append(item)
+#             segmentation_batch.append(sanitized)
 #         else:
 #             raise ValueError(f"Tâche inconnue : {task}")
 
@@ -51,40 +51,62 @@ def flatten(batch):
 #         "segmentation": list_data_collate(segmentation_batch) if segmentation_batch else None,
 #     }
 #     return result
-
+from monai.data.utils import list_data_collate
+import torch
 
 def multitask_collate_fn(batch):
     flat_batch = list(flatten(batch))
 
     classification_batch = []
-    segmentation_batch = []
+    segmentation_mbh = []
+    segmentation_inhouse = []
 
     for item in flat_batch:
-        if item["task"] == "classification":
-            # Retire label si None
-            if item.get("label") is None:
-                item = {k: v for k, v in item.items() if k != "label"}
+        task = item["task"]
+        
+        # 1. On crée un nouveau dictionnaire propre (sans les métadonnées MONAI)
+        clean_item = {"task": task}
+        
+        # 2. Nettoyage de l'image (extraction du tenseur pur)
+        img = item["image"]
+        clean_item["image"] = img.as_tensor() if hasattr(img, "as_tensor") else img
+        
+        # 3. Nettoyage du masque de segmentation (uniquement s'il existe et n'est pas None)
+        if "label" in item and item["label"] is not None:
+            lbl = item["label"]
+            clean_item["label"] = lbl.as_tensor() if hasattr(lbl, "as_tensor") else lbl
 
-            # Force class_label en torch.Tensor pur — pas MetaTensor
+        # 4. Nettoyage du label de classification
+        if "class_label" in item:
             cl = item["class_label"]
-            if not isinstance(cl, torch.Tensor):
-                cl = torch.as_tensor(cl, dtype=torch.float32)
-            
+            if hasattr(cl, "as_tensor"):
+                clean_item["class_label"] = cl.as_tensor()
+            elif not isinstance(cl, torch.Tensor):
+                clean_item["class_label"] = torch.as_tensor(cl, dtype=torch.float32)
+            else:
+                clean_item["class_label"] = cl
 
-            classification_batch.append(item)
-
-        elif item["task"] == "segmentation":
-            segmentation_batch.append(item)
+        # 5. Répartition dans le bon sous-batch
+        if task == "classification":
+            classification_batch.append(clean_item)
+        # elif task == "segmentation":
+        #     segmentation_batch.append(clean_item)
+        elif task == "seg_orig":
+            segmentation_mbh.append(clean_item)
+       
+        elif task == "seg_inhouse":
+            segmentation_inhouse.append(clean_item)
         else:
-            raise ValueError(f"Tâche inconnue : {item['task']}")
+            raise ValueError(f"Tâche inconnue : {task}")
 
+    # 6. Collation finale en toute sécurité
     result = {
         "classification": list_data_collate(classification_batch) if classification_batch else None,
-        "segmentation":   list_data_collate(segmentation_batch)   if segmentation_batch   else None,
+        "segmentation_mbh": list_data_collate(segmentation_mbh) if segmentation_mbh else None,
+        "segmentation_in_house":   list_data_collate(segmentation_inhouse)   if segmentation_inhouse   else None,
     }
 
     return result
-  
 
 
 def calculate_pos_weights(csv_path, label_cols):
