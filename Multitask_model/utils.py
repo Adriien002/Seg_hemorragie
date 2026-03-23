@@ -102,8 +102,8 @@ def multitask_collate_fn(batch):
     # 6. Collation finale en toute sécurité
     result = {
         "classification": list_data_collate(classification_batch) if classification_batch else None,
-        "segmentation_mbh": list_data_collate(segmentation_mbh) if segmentation_mbh else None,
-        "segmentation_in_house":   list_data_collate(segmentation_inhouse)   if segmentation_inhouse   else None,
+        "seg_orig": list_data_collate(segmentation_mbh) if segmentation_mbh else None,
+        "seg_inhouse":   list_data_collate(segmentation_inhouse)   if segmentation_inhouse   else None,
     }
 
     return result
