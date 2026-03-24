@@ -84,8 +84,7 @@ train_loader = DataLoader(
 )
 
 
-val_transforms = T_mtsk.TaskBasedTransform_V3()
-
+val_transforms = T_mtsk.TaskBasedValTransform_V3()
 
     
   
@@ -110,7 +109,7 @@ val_dataset = ConcatDataset([
 
 val_loader = DataLoader(
     val_dataset, 
-    batch_size=config.batch_size, 
+    batch_size=1, 
     shuffle=False,  # Pas besoin de shuffle pour la validation
     num_workers=8,
     persistent_workers=True,
