@@ -291,7 +291,9 @@ class TaskBasedTransform_V3:
         
     def __call__(self, data):
         task = data["task"]
-        if task == "segmentation":
+        if task == "seg_orig":
+            return self.seg_pipeline(data)
+        elif task == "seg_inhouse":
             return self.seg_pipeline(data)
         elif task == "classification":
             if data.get("has_mask", True):
@@ -352,7 +354,9 @@ class TaskBasedValTransform_V3:
 
     def __call__(self, data):
         task = data["task"]
-        if task == "segmentation":
+        if task == "seg_orig":
+            return self.seg_pipeline(data)
+        elif task == "seg_inhouse":
             return self.seg_pipeline(data)
         elif task == "classification":
             if data.get("has_mask", True):
