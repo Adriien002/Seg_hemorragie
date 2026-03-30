@@ -12,5 +12,6 @@ CLASS_NAMES = ['any', 'epidural', 'intraparenchymal', 'intraventricular', 'subar
 num_epochs = 1000
 batch_size = 2
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-SAVE_DIR = "/home/tibia/Projet_Hemorragie/Checkpoints/mbh/MBH_multitask_pseudomasks_entire_dataset"
+SAVE_DIR = "/home/tibia/Projet_Hemorragie/Checkpoints/mbh/full_in_house_96666"
 os.makedirs(SAVE_DIR, exist_ok=True)
+IN_HOUSE_DIR = "/home/tibia/Projet_Hemorragie/Datasets/in_house/split_in_house_"

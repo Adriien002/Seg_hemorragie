@@ -229,7 +229,7 @@ class TaskBasedTransform_V3:
             T.ScaleIntensityRanged(keys=["image"], a_min=-10, a_max=140, b_min=0.0, b_max=1.0, clip=True),
             T.RandCropByPosNegLabeld(
                 keys=['image', 'label'], image_key='image', label_key='label',
-                pos=5.0, neg=1.0, spatial_size=(64, 64, 64), num_samples=2
+                pos=5.0, neg=1.0, spatial_size=(96, 96, 96), num_samples=2
             ),
             
             T.RandFlipd(keys=["image", "label"], spatial_axis=[0, 1], prob=0.5),
@@ -256,7 +256,7 @@ class TaskBasedTransform_V3:
             # MAGIE 2 : utilisation  pseudo-masque pour centrer le patch de 64x64x64 sur la lésion.
             T.RandCropByPosNegLabeld(
                 keys=['image', 'label'], image_key='image', label_key='label',
-                pos=5.0, neg=1.0, spatial_size=(64, 64, 64), num_samples=2
+                pos=5.0, neg=1.0, spatial_size=(96, 96, 96), num_samples=2
             ),
             T.DeleteItemsd(keys=["label"]),  # On supprime le pseudo-masque après le crop
             T.RandFlipd(keys=["image"], spatial_axis=[0, 1], prob=0.5),
@@ -279,7 +279,7 @@ class TaskBasedTransform_V3:
                                    b_min=0.0, b_max=1.0, clip=True),
             # Crop random — pas de masque guide , on mais que 1 patch par image pour pas exploser la mémoire
             T.RandSpatialCropSamplesd(
-                keys=["image"], roi_size=(64, 64, 64),
+                keys=["image"], roi_size=(96, 96, 96),
                 num_samples=1, random_size=False
             ),
             T.RandFlipd(keys=["image"], spatial_axis=[0, 1], prob=0.5),
@@ -332,7 +332,7 @@ class TaskBasedValTransform_V3:
             # On extrait UN SEUL patch ciblé sur le pseudo-masque pour tester la classification
             T.RandCropByPosNegLabeld(
                 keys=['image', 'label'], image_key='image', label_key='label',
-                pos=1.0, neg=0.0, spatial_size=(64, 64, 64), num_samples=1
+                pos=1.0, neg=0.0, spatial_size=(96, 96, 96), num_samples=1
             ),
             T.DeleteItemsd(keys=["label"]),  # Supprimer le pseudo-masque
             
@@ -348,7 +348,7 @@ class TaskBasedValTransform_V3:
             T.SpatialPadd(keys=["image"], spatial_size=(96, 96, 96)),
             T.ScaleIntensityRanged(keys=["image"], a_min=-10, a_max=140,
                                    b_min=0.0, b_max=1.0, clip=True),
-            T.RandSpatialCropSamplesd(keys=["image"], roi_size=(64, 64, 64), num_samples=1),
+            T.RandSpatialCropSamplesd(keys=["image"], roi_size=(96, 96, 96), num_samples=1),
             T.ToTensord(keys=["image", "class_label"])
         ])
 
