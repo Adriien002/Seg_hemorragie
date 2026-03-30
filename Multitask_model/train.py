@@ -1,6 +1,6 @@
 # Import depuis data/
 import data.dataset as dataset
-import data.transform as T_mtsk
+from data.transform import get_classification_transforms, get_segmentation_transforms
 
 # Import depuis models/
 from models.architecture import BasicUNetWithClassification
@@ -60,13 +60,11 @@ data_classif = dataset.get_classification_data('train') # task: "classification"
 data_cls_mask = [d for d in data_classif if d.get("has_mask", True)]
 data_cls_nomask = [d for d in data_classif if not d.get("has_mask", True)]
 
-transforms = T_mtsk.TaskBasedTransform_V3()
+ds_seg_hemo = PersistentDataset(data_seg_hemo, transform=get_segmentation_transforms('train', 'seg_hemorragie'), cache_dir=os.path.join(config.SAVE_DIR, "cache_seg_hemo"))
+ds_seg_in_house = PersistentDataset(data_seg_in_house, transform=get_segmentation_transforms('train', 'seg_nouveau_1'), cache_dir=os.path.join(config.SAVE_DIR, "cache_seg_in_house"))
 
-ds_seg_hemo = PersistentDataset(data_seg_hemo, transform=transforms.seg_pipeline, cache_dir=os.path.join(config.SAVE_DIR, "cache_seg_hemo"))
-ds_seg_in_house = PersistentDataset(data_seg_in_house, transform=transforms.seg_pipeline, cache_dir=os.path.join(config.SAVE_DIR, "cache_seg_in_house"))
-
-ds_cls_mask = PersistentDataset(data_cls_mask, transform=transforms.cls_pipeline, cache_dir=os.path.join(config.SAVE_DIR, "cache_cls_mask"))
-ds_cls_nomask = PersistentDataset(data_cls_nomask, transform=transforms.cls_pipeline_no_mask, cache_dir=os.path.join(config.SAVE_DIR, "cache_cls_nomask"))
+ds_cls_mask = PersistentDataset(data_cls_mask, transform=get_classification_transforms('train', True), cache_dir=os.path.join(config.SAVE_DIR, "cache_cls_mask"))
+ds_cls_nomask = PersistentDataset(data_cls_nomask, transform=get_classification_transforms('train', False), cache_dir=os.path.join(config.SAVE_DIR, "cache_cls_nomask"))
 
 # 4. Fusionner le tout
 train_dataset = ConcatDataset([
@@ -84,7 +82,7 @@ train_loader = DataLoader(
 )
 
 
-val_transforms = T_mtsk.TaskBasedValTransform_V3()
+
 
     
   
@@ -97,10 +95,10 @@ data_cls_mask_val = [d for d in data_classif_val if d.get("has_mask", True)]
 data_cls_nomask_val = [d for d in data_classif_val if not d.get("has_mask", True)]
 
 
-val_ds_seg_hemo = PersistentDataset(data_seg_hemo_val, transform=val_transforms.seg_pipeline, cache_dir=os.path.join(config.SAVE_DIR, "cache_seg_hemo_val"))
-val_ds_seg_in_house = PersistentDataset(data_seg_in_house_val, transform=val_transforms.seg_pipeline, cache_dir=os.path.join(config.SAVE_DIR, "cache_seg_in_house_val"))
-val_ds_cls_mask = PersistentDataset(data_cls_mask_val, transform=val_transforms.cls_pipeline, cache_dir=os.path.join(config.SAVE_DIR, "cache_cls_mask_val"))
-val_ds_cls_nomask = PersistentDataset(data_cls_nomask_val, transform=val_transforms.cls_pipeline_no_mask, cache_dir=os.path.join(config.SAVE_DIR, "cache_cls_nomask_val"))
+val_ds_seg_hemo = PersistentDataset(data_seg_hemo_val, transform=get_segmentation_transforms('val', 'seg_hemorragie'), cache_dir=os.path.join(config.SAVE_DIR, "cache_seg_hemo_val"))
+val_ds_seg_in_house = PersistentDataset(data_seg_in_house_val, transform=get_segmentation_transforms('val', 'seg_nouveau_1'), cache_dir=os.path.join(config.SAVE_DIR, "cache_seg_in_house_val"))
+val_ds_cls_mask = PersistentDataset(data_cls_mask_val, transform=get_classification_transforms('val', True), cache_dir=os.path.join(config.SAVE_DIR, "cache_cls_mask_val"))
+val_ds_cls_nomask = PersistentDataset(data_cls_nomask_val, transform=get_classification_transforms('val', False), cache_dir=os.path.join(config.SAVE_DIR, "cache_cls_nomask_val"))
 
 # 4. Fusionner le tout
 val_dataset = ConcatDataset([
