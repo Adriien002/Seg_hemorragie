@@ -1,4 +1,6 @@
 # Import depuis data/
+import wandb
+
 import data.dataset as dataset
 from data.transform import get_classification_transforms, get_segmentation_transforms
 
@@ -19,12 +21,10 @@ import config
 
 import random
 
+
+
 import warnings
-warnings.filterwarnings(
-    "ignore",
-    message="You are using `torch.load` with `weights_only=False`*",
-    category=FutureWarning,
-)
+
 
 warnings.filterwarnings("ignore", message="You are using torch.load with weights_only=False")
 config_l = dict(
@@ -60,8 +60,8 @@ data_classif = dataset.get_classification_data('train') # task: "classification"
 data_cls_mask = [d for d in data_classif if d.get("has_mask", True)]
 data_cls_nomask = [d for d in data_classif if not d.get("has_mask", True)]
 
-ds_seg_hemo = PersistentDataset(data_seg_hemo, transform=get_segmentation_transforms('train', 'seg_hemorragie'), cache_dir=os.path.join(config.SAVE_DIR, "cache_seg_hemo"))
-ds_seg_in_house = PersistentDataset(data_seg_in_house, transform=get_segmentation_transforms('train', 'seg_nouveau_1'), cache_dir=os.path.join(config.SAVE_DIR, "cache_seg_in_house"))
+ds_seg_hemo = PersistentDataset(data_seg_hemo, transform=get_segmentation_transforms('train', 'mbh'), cache_dir=os.path.join(config.SAVE_DIR, "cache_seg_hemo"))
+ds_seg_in_house = PersistentDataset(data_seg_in_house, transform=get_segmentation_transforms('train', 'in_house'), cache_dir=os.path.join(config.SAVE_DIR, "cache_seg_in_house"))
 
 ds_cls_mask = PersistentDataset(data_cls_mask, transform=get_classification_transforms('train', True), cache_dir=os.path.join(config.SAVE_DIR, "cache_cls_mask"))
 ds_cls_nomask = PersistentDataset(data_cls_nomask, transform=get_classification_transforms('train', False), cache_dir=os.path.join(config.SAVE_DIR, "cache_cls_nomask"))
@@ -95,8 +95,8 @@ data_cls_mask_val = [d for d in data_classif_val if d.get("has_mask", True)]
 data_cls_nomask_val = [d for d in data_classif_val if not d.get("has_mask", True)]
 
 
-val_ds_seg_hemo = PersistentDataset(data_seg_hemo_val, transform=get_segmentation_transforms('val', 'seg_hemorragie'), cache_dir=os.path.join(config.SAVE_DIR, "cache_seg_hemo_val"))
-val_ds_seg_in_house = PersistentDataset(data_seg_in_house_val, transform=get_segmentation_transforms('val', 'seg_nouveau_1'), cache_dir=os.path.join(config.SAVE_DIR, "cache_seg_in_house_val"))
+val_ds_seg_hemo = PersistentDataset(data_seg_hemo_val, transform=get_segmentation_transforms('val', 'mbh'), cache_dir=os.path.join(config.SAVE_DIR, "cache_seg_hemo_val"))
+val_ds_seg_in_house = PersistentDataset(data_seg_in_house_val, transform=get_segmentation_transforms('val', 'in_house'), cache_dir=os.path.join(config.SAVE_DIR, "cache_seg_in_house_val"))
 val_ds_cls_mask = PersistentDataset(data_cls_mask_val, transform=get_classification_transforms('val', True), cache_dir=os.path.join(config.SAVE_DIR, "cache_cls_mask_val"))
 val_ds_cls_nomask = PersistentDataset(data_cls_nomask_val, transform=get_classification_transforms('val', False), cache_dir=os.path.join(config.SAVE_DIR, "cache_cls_nomask_val"))
 
@@ -123,7 +123,7 @@ print(f"Total number of steps: {len(train_loader) * config.num_epochs}")
 trainer = pl.Trainer(
         max_epochs=config.num_epochs,
         accelerator="auto",
-        devices=[1],
+        devices=[0],
         default_root_dir=config.SAVE_DIR,
         logger= wandb_logger,
         #logger=TensorBoardLogger(SAVE_DIR, name="multitask_unet3

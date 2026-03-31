@@ -9,7 +9,7 @@ import math
 import monai.transforms as T
 import config
 
-def get_segmentation_transform(subset,dataset_name):
+def get_segmentation_transforms(subset,dataset_name):
     
     transforms = [   
    # 1. Chargement et formatage de base
@@ -44,7 +44,8 @@ def get_segmentation_transform(subset,dataset_name):
                 label_key='label',
                 spatial_size=config.img_size,
                 num_samples=config.patch_per_case,
-                ratios =config.class_ratios_per_dataset[dataset_name]
+                ratios =config.class_ratios_per_dataset[dataset_name],
+                num_classes=len(config.class_ratios_per_dataset[dataset_name])
             )
             )
             
@@ -52,7 +53,7 @@ def get_segmentation_transform(subset,dataset_name):
         
     return T.Compose(transforms)       
         
-def get_classification_transform(subset, has_mask):
+def get_classification_transforms(subset, has_mask):
     """
     Crée la pipeline de classification, guidée par masque ou non.
     """
