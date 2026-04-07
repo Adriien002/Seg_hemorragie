@@ -25,11 +25,12 @@ warnings.filterwarnings("ignore", message="You are using torch.load with weights
 
 def main():
     cfg=config.CONFIG
+    pl.seed_everything(42, workers=True)
         # Logger W&B
         # ---------------------------
-    wandb_logger = WandbLogger(project="segmentation_MBH", config=cfg,save_dir=cfg['dataset']['save_dir'])
-
-        # ---------------------------
+    #wandb_logger = WandbLogger(project="segmentation_MBH",name = cfg['dataset']['name_run'], config=cfg,save_dir=cfg['dataset']['save_dir'])
+    wandb_logger = WandbLogger(project="segmentation_MBH",name = cfg['dataset']['name_run'], config=cfg,save_dir=cfg['dataset']['save_dir'])
+       # ---------------------------
         # Load data
         # ---------------------------
     #train_files = dataset.get_data_files_3(f"{cfg['dataset']['dataset_dir']}")
@@ -63,24 +64,25 @@ def main():
         # ---------------------------
         # Callbacks
         # ---------------------------
-    # callbacks = [
-    #         #EarlyStopping(monitor=cfg['callbacks']['monitor'], patience=cfg['callbacks']['patience']),
-    #         ModelCheckpoint(
-    #             monitor=cfg['callbacks']['monitor'],
-    #             mode=cfg['callbacks']['mode'],
-    #             save_top_k=cfg['callbacks']['save_top_k'],
-    #             dirpath=os.path.join(cfg['dataset']['save_dir'], "checkpoints"),
-    #             filename="best_model"
-    #         )
+    callbacks = [
+            #EarlyStopping(monitor=cfg['callbacks']['monitor'], patience=cfg['callbacks']['patience']),
+            ModelCheckpoint(
+                monitor=cfg['callbacks']['monitor'],
+                mode=cfg['callbacks']['mode'],
+                save_top_k=cfg['callbacks']['save_top_k'],
+                dirpath=os.path.join(cfg['dataset']['save_dir'], "checkpoints"),
+                filename="best_model"
+            )
             #LearningRateMonitor(logging_interval='step')
        # ]
-    callbacks = [
-    ModelCheckpoint(
-        dirpath=os.path.join(cfg['dataset']['save_dir'], "checkpoints"),
-        filename="last_model",
-        save_last=True,      # garde uniquement le dernier modèle
-        save_top_k=1      
-    )
+    # callbacks = [
+    # ModelCheckpoint(
+    #     dirpath=os.path.join(cfg['dataset']['save_dir'], "checkpoints"),
+    #     filename="true_model",
+    #     save_last=True,  
+    #     # garde uniquement le dernier modèle
+    #     save_top_k=1      
+    # )
 ]
 
 

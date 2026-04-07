@@ -40,6 +40,9 @@ class HemorrhageModel(pl.LightningModule):
         #     include_background=False, 
         #     reduction="mean_batch" # Calcule la moyenne par classe sur tous les lots
         # )
+        
+    def forward(self, x):
+        return self.model(x)
 
     def training_step(self, batch, batch_idx):
         x, y = batch["image"], batch["seg"] #([num_samples*2 , 1, 96, 96, 96]) , ([num_samples*2 , 1, 96, 96, 96])
@@ -125,9 +128,11 @@ class HemorrhageModel(pl.LightningModule):
         # Inférence avec sliding window
         y_hat = sliding_window_inference(
             x,
-            roi_size=(96, 96, 96),
+            roi_size=(64, 64, 64),
             sw_batch_size=2,
-            predictor=self.model
+            predictor=self.model,
+            mode ='gaussian',
+            overlap =0.5
         )
         
         # Calcul des scores Dice
@@ -153,7 +158,7 @@ class HemorrhageModel(pl.LightningModule):
             'ground_truth': y.cpu(),
             'original_image': x.cpu(),
             'affine': batch["image"].meta.get("affine", torch.eye(4)),
-            'original_shape': batch["image"].meta.get("spatial_shape", y_hat.shape[2:]),
+            'original_shape': batch["image"].meta.get("spatial_shape", y_hat.shape),
             'image_meta_dict': batch["image"].meta                                        
         }
   
