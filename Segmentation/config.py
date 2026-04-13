@@ -6,15 +6,15 @@ CONFIG = {
     
     "dataset": {
         "dataset_dir": "/home/tibia/Projet_Hemorragie/Datasets/mbh/Split_Final_Stratified", #"/home/tibia/Projet_Hemorragie/Seg_hemorragie/split_MONAI" ,  # ,#/home/tibia/Projet_Hemorragie/MBH_train" #"/home/tibia/Projet_Hemorragie/MBH_train" , "/home/tibia/Projet_Hemorragie/split_in_house_"   #"/home/tibia/Projet_Hemorragie/Split_MBH_V2" ,#/home/tibia/Projet_Hemorragie/MBH_train",             
-        "save_dir": "/home/tibia/Projet_Hemorragie/Checkpoints/mbh/test_seg_ntransf",
-        "name_run": "vf_split_2021_10_11_15_00_00",
+        "save_dir": "/home/tibia/Projet_Hemorragie/Checkpoints/mbh/test_unet_2",
+        "name_run": "unet_based",
     },
     
     "training": {
         "batch_size": 2,
         "num_epochs": 1000,
         "optimizer": "sgd",  # AdamW or SGD
-        "learning_rate": 1e-3,
+        "learning_rate": 1e-3,  #1e-3,
         "weight_decay": 3e-5,
         "momentum": 0.99,
     },
@@ -34,7 +34,7 @@ CONFIG = {
     # },
     
     "augmentation": {
-        "spatial_size": (64, 64, 64),
+        "spatial_size": (96, 96, 96),
         "pos_ratio": 5.0,
         "neg_ratio": 1.0,
         "prob": 0.5,

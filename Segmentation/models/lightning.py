@@ -12,6 +12,7 @@ import monai.networks.nets as monai_nets
 import torch
 import numpy as np
 import models.architecture as architecture
+from monai.networks.nets import UNet
 
 class HemorrhageModel(pl.LightningModule):
     def __init__(self, num_steps):
@@ -22,14 +23,24 @@ class HemorrhageModel(pl.LightningModule):
         self.num_steps = num_steps
         # self.model = monai_nets.UNet(**self.config["model"])
         
-        self.model = architecture.BasicUNetWithClassification(
+        # self.model = architecture.BasicUNetWithClassification(
+        #     spatial_dims=3,
+        #     in_channels=1,
+        #     out_channels=6,
+        #     num_cls_classes=6,
+        #     features=(32, 32, 64, 128, 256, 32)
+        # )
+        
+        self.model = UNet(
             spatial_dims=3,
             in_channels=1,
             out_channels=6,
-            num_cls_classes=6,
-            features=(32, 32, 64, 128, 256, 32)
+            channels=(32, 64, 128, 256, 320, 320),
+            strides=(2, 2, 2, 2, 2),
+            num_res_units=2
         )
-        self.loss_fn = DiceCELoss(to_onehot_y=True, softmax=True, include_background=False)
+
+        self.loss_fn = DiceCELoss(to_onehot_y=True, softmax=True, include_background=False,batch=True) #ajout batch=True pour calculer la perte sur tout le batch plutôt que par échantillon
         self.dice_metric = DiceHelper(include_background=False,
                                       softmax=True,
                                       num_classes=6,

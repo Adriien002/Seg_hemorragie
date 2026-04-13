@@ -95,7 +95,9 @@ def main():
             devices=[1],
             default_root_dir=cfg['dataset']['save_dir'],
             logger=wandb_logger,
-            callbacks=callbacks
+            callbacks=callbacks,
+            precision= '16-mixed',
+            num_sanity_val_steps=2 if torch.cuda.device_count() > 0 else 0,
             #gradient_clip_val=1.0
         )
 

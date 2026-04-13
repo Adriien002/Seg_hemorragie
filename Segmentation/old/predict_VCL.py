@@ -27,8 +27,11 @@ import numpy as np
 
 config = config.CONFIG
 
+#predict_files = dataset.get_data_files_2(f"{config['dataset']['dataset_dir']}")
 predict_files = dataset.get_data_files(f"{config['dataset']['dataset_dir']}/val/img",
-                                       f"{config['dataset']['dataset_dir']}/val/seg") #same as val
+                                      f"{config['dataset']['dataset_dir']}/val/seg")
+
+#same as val (donné seg jsute uitlisé pour dices indicatifs)
     
 predict_dataset = PersistentDataset(
         predict_files,
@@ -42,7 +45,7 @@ predict_loader = DataLoader(predict_dataset, batch_size=1, shuffle=False,  num_w
 trainer = pl.Trainer(
         max_epochs=config['training']['num_epochs'],
         accelerator="auto",
-        devices=[0],
+        devices=[1],
         default_root_dir=config['dataset']['save_dir'],
     )
 
@@ -113,7 +116,7 @@ def clean_metadata_for_saveimage(meta_dict):
 print("Inference beginning")
 predictions = trainer.predict(model, dataloaders=predict_loader)
     
-# Traitement des résultats
+# Traitement des résultats ( indicatifs ici)
 all_dice_scores = {f"dice_c{i+1}": [] for i in range(5)}
     
 print("\n" + "="*50)
@@ -128,7 +131,7 @@ for i, batch_result in enumerate(predictions):
     print(f"\nFile: {batch_result['filename']}")
     print("-" * 30)
     
-    # Nettoyer les métadonnées COMPLÈTEMENT
+    # Nettoyer les métadonnées COMPLÈTEMENT sinon SaveImage plante
     original_meta = batch_result.get("image_meta_dict", {})
     cleaned_meta = clean_metadata_for_saveimage(original_meta)
     
@@ -142,12 +145,12 @@ for i, batch_result in enumerate(predictions):
     
     # Enlever la dimension batch si elle existe
     if pred_discrete.dim() == 4 and pred_discrete.shape[0] == 1:
-        pred_discrete = pred_discrete[0]  # [1, H, W, D] -> [H, W, D]
+        pred_discrete = pred_discrete[0]  # [1, H, W, D] -> [H, W, D] , on enleve batch size 1
     
     print(f"Pred shape after cleanup: {pred_discrete.shape}")
     
     try:
-        # Sauvegarde avec SaveImage (pas SaveImaged)
+        # Sauvegarde avec SaveImage (pas SaveImaged car ne marhce pas ici)
         # SaveImage prend img et meta_data séparément
         save_pred(img=pred_discrete.cpu(), meta_data=cleaned_meta)
         print(f"Fichier sauvegardé : {batch_result['filename']}")
@@ -171,11 +174,11 @@ for i, batch_result in enumerate(predictions):
                     print(f"  PROBLEME: {k} a encore {v.ndim} dimensions!")
 
 # Calcul des scores moyens
-print("\n" + "="*50)
-print("SCORES MOYENS PAR CLASSE")
-print("="*50)
-for class_name, scores in all_dice_scores.items():
-    if scores:
-        mean_score = np.mean(scores)
-        std_score = np.std(scores)
-        print(f"{class_name}: {mean_score:.4f} ± {std_score:.4f}")
+# print("\n" + "="*50)
+# print("SCORES MOYENS PAR CLASSE")
+# print("="*50)
+# for class_name, scores in all_dice_scores.items():
+#     if scores:
+#         mean_score = np.mean(scores)
+#         std_score = np.std(scores)
+#         print(f"{class_name}: {mean_score:.4f} ± {std_score:.4f}")
