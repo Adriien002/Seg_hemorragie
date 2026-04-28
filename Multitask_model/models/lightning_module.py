@@ -482,7 +482,7 @@ import torch.nn as nn
 import data.dataset as dataset
 
 class MultiTaskHemorrhageModule(pl.LightningModule):
-    def __init__(self, num_steps: int, seg_weight: float = 1.0, cls_weight: float = 0.5):
+    def __init__(self, num_steps: int, seg_weight: float = 1.0, cls_weight: float = 0.2):
         super().__init__()
         self.save_hyperparameters()
         

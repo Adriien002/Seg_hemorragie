@@ -364,12 +364,13 @@ class BasicUNetWithClassification(nn.Module):
         self.cls_head = nn.Sequential(
             nn.Conv3d(fea[4], fea[4], kernel_size=1),
             nn.LeakyReLU(inplace=True),
+            nn.Dropout3d(0.2),  # dropout spatial sur les feature maps
             nn.AdaptiveMaxPool3d((2,2,2)),
             nn.Flatten(),
             nn.Linear(fea[4] * 8, 256),
             nn.LayerNorm(256),
             nn.LeakyReLU(inplace=True),
-            nn.Dropout(0.3),
+            nn.Dropout(0.5),
             nn.Linear(256, num_cls_classes)
         )
    

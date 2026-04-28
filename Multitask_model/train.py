@@ -16,7 +16,8 @@ import torch
 import os
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
-from torch.utils.data import ConcatDataset
+from torch.utils.data import ConcatDataset, WeightedRandomSampler
+from data.samplers import create_multitask_sampler
 import config
 
 import random
@@ -25,7 +26,7 @@ import random
 
 import warnings
 
-
+warnings.filterwarnings("ignore", message=".*no available indices of class.*")
 warnings.filterwarnings("ignore", message="You are using torch.load with weights_only=False")
 config_l = dict(
     sharing_type="hard",   # "soft" ou "fine_tune"
@@ -53,6 +54,10 @@ wandb_logger = WandbLogger(
 
 torch.cuda.empty_cache()
 
+local_cache_dir = "/home/tibia/Projet_Hemorragie/Cache"  # Répertoire local pour le cache des données
+os.makedirs(local_cache_dir, exist_ok=True)
+
+
 
 data_seg_hemo = dataset.get_segmentation_data('train') # task: "seg_hemorragie"
 data_seg_in_house = dataset.get_inhouse_segmentation_data('train') # task: "seg_nouveau_1"
@@ -60,22 +65,29 @@ data_classif = dataset.get_classification_data('train') # task: "classification"
 data_cls_mask = [d for d in data_classif if d.get("has_mask", True)]
 data_cls_nomask = [d for d in data_classif if not d.get("has_mask", True)]
 
-ds_seg_hemo = PersistentDataset(data_seg_hemo, transform=get_segmentation_transforms('train', 'mbh'), cache_dir=os.path.join(config.SAVE_DIR, "cache_seg_hemo"))
-ds_seg_in_house = PersistentDataset(data_seg_in_house, transform=get_segmentation_transforms('train', 'in_house'), cache_dir=os.path.join(config.SAVE_DIR, "cache_seg_in_house"))
+ds_seg_hemo = PersistentDataset(data_seg_hemo, transform=get_segmentation_transforms('train', 'mbh'), cache_dir=os.path.join(local_cache_dir, "cache_seg_hemo"))
+ds_seg_in_house = PersistentDataset(data_seg_in_house, transform=get_segmentation_transforms('train', 'in_house'), cache_dir=os.path.join(local_cache_dir, "cache_seg_in_house"))
 
-ds_cls_mask = PersistentDataset(data_cls_mask, transform=get_classification_transforms('train', True), cache_dir=os.path.join(config.SAVE_DIR, "cache_cls_mask"))
-ds_cls_nomask = PersistentDataset(data_cls_nomask, transform=get_classification_transforms('train', False), cache_dir=os.path.join(config.SAVE_DIR, "cache_cls_nomask"))
+ds_cls_mask = PersistentDataset(data_cls_mask, transform=get_classification_transforms('train', True), cache_dir=os.path.join(local_cache_dir, "cache_cls_mask"))
+ds_cls_nomask = PersistentDataset(data_cls_nomask, transform=get_classification_transforms('train', False), cache_dir=os.path.join(local_cache_dir, "cache_cls_nomask"))
 
 # 4. Fusionner le tout
 train_dataset = ConcatDataset([
     ds_seg_hemo, ds_seg_in_house, ds_cls_mask, ds_cls_nomask
 ])
 
+train_sampler = create_multitask_sampler(
+    data_seg_orig=data_seg_hemo,
+    data_seg_inhouse=data_seg_in_house,
+    data_classif=data_classif,
+    num_samples=1000 * config.batch_size,  # 250 steps/epoch fixe comme MS-JEPA
+)
+
 train_loader = DataLoader(
-    train_dataset, 
-    batch_size=config.batch_size, 
-    shuffle=True, 
-    num_workers=8,
+    train_dataset,
+    batch_size=config.batch_size,
+    sampler=train_sampler,
+    num_workers=4,
     persistent_workers=True,
     pin_memory=True,
     collate_fn=utils.multitask_collate_fn
@@ -95,10 +107,10 @@ data_cls_mask_val = [d for d in data_classif_val if d.get("has_mask", True)]
 data_cls_nomask_val = [d for d in data_classif_val if not d.get("has_mask", True)]
 
 
-val_ds_seg_hemo = PersistentDataset(data_seg_hemo_val, transform=get_segmentation_transforms('val', 'mbh'), cache_dir=os.path.join(config.SAVE_DIR, "cache_seg_hemo_val"))
-val_ds_seg_in_house = PersistentDataset(data_seg_in_house_val, transform=get_segmentation_transforms('val', 'in_house'), cache_dir=os.path.join(config.SAVE_DIR, "cache_seg_in_house_val"))
-val_ds_cls_mask = PersistentDataset(data_cls_mask_val, transform=get_classification_transforms('val', True), cache_dir=os.path.join(config.SAVE_DIR, "cache_cls_mask_val"))
-val_ds_cls_nomask = PersistentDataset(data_cls_nomask_val, transform=get_classification_transforms('val', False), cache_dir=os.path.join(config.SAVE_DIR, "cache_cls_nomask_val"))
+val_ds_seg_hemo = PersistentDataset(data_seg_hemo_val, transform=get_segmentation_transforms('val', 'mbh'), cache_dir=os.path.join(local_cache_dir, "cache_seg_hemo_val"))
+val_ds_seg_in_house = PersistentDataset(data_seg_in_house_val, transform=get_segmentation_transforms('val', 'in_house'), cache_dir=os.path.join(local_cache_dir, "cache_seg_in_house_val"))
+val_ds_cls_mask = PersistentDataset(data_cls_mask_val, transform=get_classification_transforms('val', True), cache_dir=os.path.join(local_cache_dir, "cache_cls_mask_val"))
+val_ds_cls_nomask = PersistentDataset(data_cls_nomask_val, transform=get_classification_transforms('val', False), cache_dir=os.path.join(local_cache_dir, "cache_cls_nomask_val"))
 
 # 4. Fusionner le tout
 val_dataset = ConcatDataset([
@@ -109,7 +121,7 @@ val_loader = DataLoader(
     val_dataset, 
     batch_size=1, 
     shuffle=False,  # Pas besoin de shuffle pour la validation
-    num_workers=8,
+    num_workers=4,
     persistent_workers=True,
     pin_memory=True,
     collate_fn=utils.multitask_collate_fn
@@ -123,14 +135,15 @@ print(f"Total number of steps: {len(train_loader) * config.num_epochs}")
 trainer = pl.Trainer(
         max_epochs=config.num_epochs,
         accelerator="auto",
-        devices=[0],
+        devices=[1],
         default_root_dir=config.SAVE_DIR,
         logger= wandb_logger,
         #logger=TensorBoardLogger(SAVE_DIR, name="multitask_unet3
         #gradient_clip_val=1.0,  # Gradient clipping pour la stabilité
         log_every_n_steps=50,
+        check_val_every_n_epoch=5,
         #accumulate_grad_batches=4 ,# Ajout car pour gérer les petites tailles de batch ( dues à limitation mémoire)
-        #precision='16-mixed',  # Mixed precision pour accélérer l'entraînement
+        precision='16-mixed',  # Mixed precision pour accélérer l'entraînement
         callbacks=[
             #EarlyStopping(monitor='train_loss_epoch', patience=100, mode='min', verbose=True),
             ModelCheckpoint( dirpath=config.SAVE_DIR,filename='best_model',monitor='val_seg_loss', mode='min', save_top_k=1)
