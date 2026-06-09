@@ -17,8 +17,9 @@ class BasicUNetWithClassification(nn.Module):
         self,
         spatial_dims: int = 3,
         in_channels: int = 1,
-        out_channels_orig: int = 6,     # Classes pour RSNA/orig
-        out_channels_inhouse: int = 4,  # Classes pour in-house
+        out_channels_orig: int = 6,      # Classes pour RSNA/orig
+        out_channels_inhouse: int = 4,   # Classes pour in-house
+        out_channels_instance: int = 2,  # Classes pour INSTANCE 2022
         num_cls_classes: int = 6,
         features: Sequence[int] = (32, 32, 64, 128, 256, 32),
         act: str | tuple = ("LeakyReLU", {"negative_slope": 0.1, "inplace": True}),
@@ -58,6 +59,15 @@ class BasicUNetWithClassification(nn.Module):
         self.upcat_2_inhouse = UpCat(spatial_dims, fea[2], fea[1], fea[1], act, norm, bias, dropout, upsample)
         self.upcat_1_inhouse = UpCat(spatial_dims, fea[1], fea[0], fea[5], act, norm, bias, dropout, upsample, halves=False)
         self.final_conv_inhouse = Conv["conv", spatial_dims](fea[5], out_channels_inhouse, kernel_size=1)
+
+        # ==========================================
+        # 4. DÉCODEUR C : Segmentation INSTANCE 2022 (2 classes)
+        # ==========================================
+        self.upcat_4_instance = UpCat(spatial_dims, fea[4], fea[3], fea[3], act, norm, bias, dropout, upsample)
+        self.upcat_3_instance = UpCat(spatial_dims, fea[3], fea[2], fea[2], act, norm, bias, dropout, upsample)
+        self.upcat_2_instance = UpCat(spatial_dims, fea[2], fea[1], fea[1], act, norm, bias, dropout, upsample)
+        self.upcat_1_instance = UpCat(spatial_dims, fea[1], fea[0], fea[5], act, norm, bias, dropout, upsample, halves=False)
+        self.final_conv_instance = Conv["conv", spatial_dims](fea[5], out_channels_instance, kernel_size=1)
      
         # ==========================================
         # 4. TÊTE C : Classification
@@ -74,48 +84,44 @@ class BasicUNetWithClassification(nn.Module):
             nn.Dropout(0.5),
             nn.Linear(256, num_cls_classes)
         )
+
+        # Projection spatiale bottleneck → espace classes pour Lmta
+        self.cls_spatial_proj = Conv["conv", spatial_dims](fea[4], out_channels_orig, kernel_size=1)
    
     def forward(self, x: torch.Tensor, task: str = "seg_orig", batch_size: int = None):
-        # --- PASSAGE DANS L'ENCODEUR COMMUN ---
+        # Encodeur commun
         x0 = self.conv_0(x)
         x1 = self.down_1(x0)
         x2 = self.down_2(x1)
         x3 = self.down_3(x2)
         x4 = self.down_4(x3)
-        
-        # --- ROUTAGE VERS LA BONNE TÊTE ---
-        if task == "classification":
-            # On utilise le masque d'attention sur le décodeur "orig" (qui contient le plus de classes)
-            # # pour guider la classification, comme tu le faisais avant.
-            # u4 = self.upcat_4_orig(x4, x3)
-            # u3 = self.upcat_3_orig(u4, x2)
-            # u2 = self.upcat_2_orig(u3, x1)
-            # u1 = self.upcat_1_orig(u2, x0)
-            # seg_logits = self.final_conv_orig(u1)
-            
-            # probs = torch.softmax(seg_logits, dim=1)
-            # lesion_attention = probs[:, 1:, ...].sum(dim=1, keepdim=True) 
-            # pooled_attention = F.adaptive_max_pool3d(lesion_attention, output_size=x4.shape[2:])
-            
-            # masked_x4 = x4 * (1.0 + pooled_attention)
-            cls_logits = self.cls_head(x4)
-            return None, cls_logits
 
-        elif task == "seg_orig":
-            u4 = self.upcat_4_orig(x4, x3)
-            u3 = self.upcat_3_orig(u4, x2)
-            u2 = self.upcat_2_orig(u3, x1)
-            u1 = self.upcat_1_orig(u2, x0)
-            seg_logits = self.final_conv_orig(u1)
-            return seg_logits, None
-            
-        elif task == "seg_inhouse":
+        # cls_head seulement pour les tâches qui utilisent cls_logits en loss
+        cls_logits = self.cls_head(x4) if task not in ("seg_inhouse", "seg_instance") else None
+
+        if task == "seg_inhouse":
             u4 = self.upcat_4_inhouse(x4, x3)
             u3 = self.upcat_3_inhouse(u4, x2)
             u2 = self.upcat_2_inhouse(u3, x1)
             u1 = self.upcat_1_inhouse(u2, x0)
             seg_logits = self.final_conv_inhouse(u1)
-            return seg_logits, None
-            
-        else:
-            raise ValueError(f"Tâche non reconnue dans l'architecture : {task}")
+            return seg_logits, None, None, None
+
+        if task == "seg_instance":
+            u4 = self.upcat_4_instance(x4, x3)
+            u3 = self.upcat_3_instance(u4, x2)
+            u2 = self.upcat_2_instance(u3, x1)
+            u1 = self.upcat_1_instance(u2, x0)
+            seg_logits = self.final_conv_instance(u1)
+            return seg_logits, None, None, None
+
+        # Décodeur seg_orig — aussi utilisé pour classification (P/S pour Lmta)
+        u4 = self.upcat_4_orig(x4, x3)
+        u3 = self.upcat_3_orig(u4, x2)
+        u2 = self.upcat_2_orig(u3, x1)
+        u1 = self.upcat_1_orig(u2, x0)
+        seg_logits = self.final_conv_orig(u1)
+        S = torch.softmax(seg_logits, dim=1)
+        P = torch.softmax(self.cls_spatial_proj(x4), dim=1)
+
+        return seg_logits, cls_logits, P, S

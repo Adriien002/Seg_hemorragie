@@ -8,18 +8,20 @@ from torch.optim import SGD
 from torchmetrics.classification import MultilabelRecall, MultilabelAUROC, MultilabelPrecision
 from transformers import get_linear_schedule_with_warmup
 import torch
+import torch.nn.functional as F
 import config
 import torch.nn as nn
 import data.dataset as dataset
 
 class MultiTaskHemorrhageModule(pl.LightningModule):
-    def __init__(self, num_steps: int, seg_weight: float = 1.0, cls_weight: float = 0.2):
+    def __init__(self, num_steps: int, seg_weight: float = 1.0, cls_weight: float = 0.5, mta_weight: float = 0.1):
         super().__init__()
         self.save_hyperparameters()
-        
+
         self.num_steps = num_steps
         self.seg_weight = seg_weight
         self.cls_weight = cls_weight
+        self.mta_weight = mta_weight
         
         # Modèle multi-tâche
         self.model = Arch.BasicUNetWithClassification(
@@ -40,19 +42,13 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
         # Fonctions de perte
         self.seg_loss_fn_mbh = DiceCELoss(include_background=False, to_onehot_y=True, softmax=True)
         self.seg_loss_fn_inhouse = DiceCELoss(include_background=False, to_onehot_y=True, softmax=True)
-        self.cls_loss_fn = torch.nn.BCEWithLogitsLoss(pos_weight=self.pos_weights) 
-        
-        # Métriques de segmentation
-        # self.seg_dice_metric = DiceHelper(
-        #     include_background=False,
-        #     softmax=True,
-        #     num_classes=6,
-        #     reduction='none'
-        # )
-        
+        self.seg_loss_fn_instance = DiceCELoss(include_background=False, to_onehot_y=True, softmax=True)
+        self.cls_loss_fn = torch.nn.BCEWithLogitsLoss(pos_weight=self.pos_weights)
 
+        # Métriques de segmentation
         self.seg_orig_dice = DiceHelper(include_background=False, softmax=True, num_classes=6, reduction='none')
         self.seg_inhouse_dice = DiceHelper(include_background=False, softmax=True, num_classes=4, reduction='none')
+        self.seg_instance_dice = DiceHelper(include_background=False, softmax=True, num_classes=2, reduction='none')
         
        
         
@@ -64,33 +60,72 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
       
     def forward(self, x, task="seg_orig"):
         return self.model(x, task=task)
-        
+
+    @staticmethod
+    def _lmta_loss(P, S):
+        # P: [B, C, d, h, w] — proba spatiale bottleneck
+        # S: [B, C, D, H, W] — proba spatiale full-res (softmax déjà appliqué)
+        eps = 1e-8
+        S_down = F.adaptive_avg_pool3d(S, output_size=P.shape[2:])
+        S_down = S_down / (S_down.sum(dim=1, keepdim=True) + eps)
+        kl_ps = (P * (P.clamp(min=eps).log() - S_down.clamp(min=eps).log())).sum(dim=1).mean()
+        kl_sp = (S_down * (S_down.clamp(min=eps).log() - P.clamp(min=eps).log())).sum(dim=1).mean()
+        return kl_ps + kl_sp
+
     def training_step(self, batch, batch_idx):
         total_loss = 0.0
-        
+
         # 1. Classification
         if batch.get("classification") is not None:
             x, y = batch["classification"]["image"], batch["classification"]["class_label"]
-            _, logits = self.model(x, task="classification")
-            loss = self.cls_loss_fn(logits, y)
-            total_loss += self.cls_weight * loss
-            self.log("train_cls_loss", loss, batch_size=x.shape[0], on_epoch=True)
+            _, cls_logits, P, S = self.model(x)
+            cls_loss = self.cls_loss_fn(cls_logits, y)
+            total_loss += self.cls_weight * cls_loss
+            self.log("train_cls_loss", cls_loss, batch_size=x.shape[0], on_epoch=True)
+            if self.mta_weight > 0:
+                lmta = self._lmta_loss(P, S.detach())
+                total_loss += self.mta_weight * lmta
+                self.log("train_lmta_cls", lmta, batch_size=x.shape[0], on_epoch=True)
 
-        # 2. Segmentation Orig
+        # 2. Segmentation MBH (masques seuls, pas de label classif)
         if batch.get("seg_orig") is not None:
             x, y = batch["seg_orig"]["image"], batch["seg_orig"]["label"]
-            logits, _ = self.model(x, task="seg_orig")
-            loss = self.seg_loss_fn_mbh(logits, y)
-            total_loss += loss
-            self.log("train_seg_orig_loss", loss, batch_size=x.shape[0], on_epoch=True)
+            seg_logits, _, P, S = self.model(x)
+            seg_loss = self.seg_loss_fn_mbh(seg_logits, y)
+            total_loss += self.seg_weight * seg_loss
+            self.log("train_seg_orig_loss", seg_loss, batch_size=x.shape[0], on_epoch=True)
+            if self.mta_weight > 0:
+                lmta = self._lmta_loss(P, S.detach())
+                total_loss += self.mta_weight * lmta
+                self.log("train_lmta_seg", lmta, batch_size=x.shape[0], on_epoch=True)
 
-        # 3. Segmentation In-House
+        # 3. Seg MBH + Classification (vrais masques ET vrais labels)
+        if batch.get("seg_multi") is not None:
+            x   = batch["seg_multi"]["image"]
+            y_seg = batch["seg_multi"]["label"]
+            y_cls = batch["seg_multi"]["class_label"]
+            seg_logits, cls_logits, P, S = self.model(x)
+            seg_loss = self.seg_loss_fn_mbh(seg_logits, y_seg)
+            cls_loss = self.cls_loss_fn(cls_logits, y_cls)
+            total_loss += self.seg_weight * seg_loss + self.cls_weight * cls_loss
+            self.log("train_seg_multi_seg_loss", seg_loss, batch_size=x.shape[0], on_epoch=True)
+            self.log("train_seg_multi_cls_loss", cls_loss, batch_size=x.shape[0], on_epoch=True)
+
+        # 4. Segmentation In-House
         if batch.get("seg_inhouse") is not None:
             x, y = batch["seg_inhouse"]["image"], batch["seg_inhouse"]["label"]
-            logits, _ = self.model(x, task="seg_inhouse")
-            loss = self.seg_loss_fn_inhouse(logits, y)
-            total_loss += loss
-            self.log("train_seg_inhouse_loss", loss, batch_size=x.shape[0], on_epoch=True)
+            seg_logits, _, _, _ = self.model(x, task="seg_inhouse")
+            seg_loss = self.seg_loss_fn_inhouse(seg_logits, y)
+            total_loss += self.seg_weight * seg_loss
+            self.log("train_seg_inhouse_loss", seg_loss, batch_size=x.shape[0], on_epoch=True)
+
+        # 6. Segmentation INSTANCE
+        if batch.get("seg_instance") is not None:
+            x, y = batch["seg_instance"]["image"], batch["seg_instance"]["label"]
+            seg_logits, _, _, _ = self.model(x, task="seg_instance")
+            seg_loss = self.seg_loss_fn_instance(seg_logits, y)
+            total_loss += self.seg_weight * seg_loss
+            self.log("train_seg_instance_loss", seg_loss, batch_size=x.shape[0], on_epoch=True)
 
         self.log("train_loss", total_loss, on_step=True, on_epoch=True, prog_bar=True)
         return total_loss
@@ -99,49 +134,86 @@ class MultiTaskHemorrhageModule(pl.LightningModule):
         total_loss = 0.0
 
         # 1. Classification
-        if batch.get("classification") is not None: 
+        if batch.get("classification") is not None:
             x, y = batch["classification"]["image"], batch["classification"]["class_label"]
-            _, logits = self.model(x, task="classification")
-            loss = self.cls_loss_fn(logits, y)
-            
-            y_pred = torch.sigmoid(logits)
+            _, cls_logits, _, _ = self.model(x)
+            loss = self.cls_loss_fn(cls_logits, y)
+
+            y_pred = torch.sigmoid(cls_logits)
             self.cls_auc.update(y_pred, y.int())
             self.cls_mean_auc.update(y_pred, y.int())
-            
+
             total_loss += self.cls_weight * loss
             self.log("val_cls_loss", loss, batch_size=x.shape[0], on_epoch=True)
 
-        # 2. Segmentation Orig
+        # 2. Segmentation MBH (masques seuls)
         if batch.get("seg_orig") is not None:
             x, y = batch["seg_orig"]["image"], batch["seg_orig"]["label"]
-            y_hat = sliding_window_inference(x, roi_size=(64, 64, 64), sw_batch_size=2, predictor=lambda img: self.model(img, task="seg_orig")[0])
-            
+            y_hat = sliding_window_inference(
+                x, roi_size=(96, 96, 96), sw_batch_size=2,
+                predictor=lambda img: self.model(img)[0]
+            )
             loss = self.seg_loss_fn_mbh(y_hat, y)
             scores, _ = self.seg_orig_dice(y_hat, y)
-            
             y_labels = y.unique().long().tolist()[1:]
-            scores = {label: scores[0][label - 1].item() for label in y_labels}
-            metrics = {f'dice_c{label}': score for label, score in scores.items()}
-            
-            self.log_dict(metrics, on_epoch=True, prog_bar=True)
+            sc = {label: scores[0][label - 1].item() for label in y_labels}
+            self.log_dict({f'dice_mbh_c{l}': s for l, s in sc.items()}, on_epoch=True, prog_bar=True)
             total_loss += loss
-        
             self.log("val_seg_loss", loss, batch_size=x.shape[0])
 
+        # 3. Seg MBH + Classification (vrais masques ET vrais labels)
+        if batch.get("seg_multi") is not None:
+            x     = batch["seg_multi"]["image"]
+            y_seg = batch["seg_multi"]["label"]
+            y_cls = batch["seg_multi"]["class_label"]
+            y_hat = sliding_window_inference(
+                x, roi_size=(96, 96, 96), sw_batch_size=2,
+                predictor=lambda img: self.model(img)[0]
+            )
+            seg_loss = self.seg_loss_fn_mbh(y_hat, y_seg)
+            scores, _ = self.seg_orig_dice(y_hat, y_seg)
+            y_labels = y_seg.unique().long().tolist()[1:]
+            if y_labels:
+                sc = {label: scores[0][label - 1].item() for label in y_labels}
+                self.log_dict({f'dice_mbh_multi_c{l}': s for l, s in sc.items()}, on_epoch=True)
+            _, cls_logits, _, _ = self.model(x)
+            cls_loss = self.cls_loss_fn(cls_logits, y_cls)
+            y_pred = torch.sigmoid(cls_logits)
+            self.cls_auc.update(y_pred, y_cls.int())
+            self.cls_mean_auc.update(y_pred, y_cls.int())
+            total_loss += seg_loss + self.cls_weight * cls_loss
+            self.log("val_seg_multi_seg_loss", seg_loss, batch_size=x.shape[0], on_epoch=True)
+            self.log("val_seg_multi_cls_loss", cls_loss, batch_size=x.shape[0], on_epoch=True)
 
-        # 3. Segmentation In-House
+        # 5. Segmentation In-House
         if batch.get("seg_inhouse") is not None:
             x, y = batch["seg_inhouse"]["image"], batch["seg_inhouse"]["label"]
-            y_hat = sliding_window_inference(x, roi_size=(64, 64, 64), sw_batch_size=2, predictor=lambda img: self.model(img, task="seg_inhouse")[0])
-            
+            y_hat = sliding_window_inference(
+                x, roi_size=(96, 96, 96), sw_batch_size=2,
+                predictor=lambda img: self.model(img, task="seg_inhouse")[0]
+            )
             loss = self.seg_loss_fn_inhouse(y_hat, y)
             scores, _ = self.seg_inhouse_dice(y_hat, y)
-            
-            for label in y.unique().long().tolist()[1:]:
-                self.log(f'val_inhouse_dice_c{label}', scores[0][label - 1].item())
-                
-            total_loss +=  loss
+            y_labels = y.unique().long().tolist()[1:]
+            scores = {label: scores[0][label - 1].item() for label in y_labels}
+            self.log_dict({f'dice_inhouse_c{l}': s for l, s in scores.items()}, on_epoch=True, prog_bar=True)
+            total_loss += loss
             self.log("val_seg_inhouse_loss", loss, batch_size=x.shape[0])
+
+        # 4. Segmentation INSTANCE
+        if batch.get("seg_instance") is not None:
+            x, y = batch["seg_instance"]["image"], batch["seg_instance"]["label"]
+            y_hat = sliding_window_inference(
+                x, roi_size=(96, 96, 96), sw_batch_size=2,
+                predictor=lambda img: self.model(img, task="seg_instance")[0]
+            )
+            loss = self.seg_loss_fn_instance(y_hat, y)
+            scores, _ = self.seg_instance_dice(y_hat, y)
+            y_labels = y.unique().long().tolist()[1:]
+            scores = {label: scores[0][label - 1].item() for label in y_labels}
+            self.log_dict({f'dice_instance_c{l}': s for l, s in scores.items()}, on_epoch=True, prog_bar=True)
+            total_loss += loss
+            self.log("val_seg_instance_loss", loss, batch_size=x.shape[0])
 
         self.log("val_loss", total_loss, on_epoch=True, prog_bar=True)
 
