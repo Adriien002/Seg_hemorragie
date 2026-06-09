@@ -13,44 +13,6 @@ def flatten(batch):
             yield item
 
 
-# def _sanitize_item(item: dict) -> dict:
-#     """
-#     Convertit les champs non-MetaTensor en torch.Tensor purs
-#     pour éviter que list_data_collate ne panique sur les métadonnées.
-#     """
-#     out = {}
-#     for k, v in item.items():
-#         if isinstance(v, np.ndarray):
-#             out[k] = torch.from_numpy(v)
-#         elif isinstance(v, (int, float)):
-#             out[k] = torch.tensor(v)
-#         else:
-#             out[k] = v  # MetaTensor, str, etc. → inchangé
-#     return out
-
-
-# def multitask_collate_fn(batch):
-#     flat_batch = list(flatten(batch))
-
-#     classification_batch = []
-#     segmentation_batch = []
-
-#     for item in flat_batch:
-#         task = item["task"]
-#         sanitized = _sanitize_item(item)
-        
-#         if task == "classification":
-#             classification_batch.append(sanitized)
-#         elif task == "segmentation":
-#             segmentation_batch.append(sanitized)
-#         else:
-#             raise ValueError(f"Tâche inconnue : {task}")
-
-#     result = {
-#         "classification": list_data_collate(classification_batch) if classification_batch else None,
-#         "segmentation": list_data_collate(segmentation_batch) if segmentation_batch else None,
-#     }
-#     return result
 from monai.data.utils import list_data_collate
 import torch
 
@@ -59,7 +21,9 @@ def multitask_collate_fn(batch):
 
     classification_batch = []
     segmentation_mbh = []
+    segmentation_multi = []
     segmentation_inhouse = []
+    segmentation_instance = []
 
     for item in flat_batch:
         task = item["task"]
@@ -89,21 +53,24 @@ def multitask_collate_fn(batch):
         # 5. Répartition dans le bon sous-batch
         if task == "classification":
             classification_batch.append(clean_item)
-        # elif task == "segmentation":
-        #     segmentation_batch.append(clean_item)
         elif task == "seg_orig":
             segmentation_mbh.append(clean_item)
-       
+        elif task == "seg_multi":
+            segmentation_multi.append(clean_item)
         elif task == "seg_inhouse":
             segmentation_inhouse.append(clean_item)
+        elif task == "seg_instance":
+            segmentation_instance.append(clean_item)
         else:
             raise ValueError(f"Tâche inconnue : {task}")
 
     # 6. Collation finale en toute sécurité
     result = {
         "classification": list_data_collate(classification_batch) if classification_batch else None,
-        "seg_orig": list_data_collate(segmentation_mbh) if segmentation_mbh else None,
-        "seg_inhouse":   list_data_collate(segmentation_inhouse)   if segmentation_inhouse   else None,
+        "seg_orig":       list_data_collate(segmentation_mbh)      if segmentation_mbh      else None,
+        "seg_multi":      list_data_collate(segmentation_multi)    if segmentation_multi    else None,
+        "seg_inhouse":    list_data_collate(segmentation_inhouse)  if segmentation_inhouse  else None,
+        "seg_instance":   list_data_collate(segmentation_instance) if segmentation_instance else None,
     }
 
     return result
